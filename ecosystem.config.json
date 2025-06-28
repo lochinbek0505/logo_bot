@@ -1,0 +1,22 @@
+{
+  "apps": [
+    {
+      "name": "logosmart-bot",
+      "script": "bot/main.py",
+      "interpreter": "./venv/bin/python",
+      "args": "",
+      "watch": false,
+      "autorestart": true,
+      "max_restarts": 5,
+      "instances": 1,
+      "max_memory_restart": "1G",
+      "error_file": "logs/app.error.log",
+      "out_file": "logs/app.output.log",
+      "log_file": "logs/app.combined.log",
+      "time": true,
+      "env": {
+        "ENVIRONMENT": "production"
+      }
+    }
+  ]
+}
