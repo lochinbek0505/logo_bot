@@ -3,6 +3,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types.input_file import FSInputFile
 from aiogram.enums.parse_mode import ParseMode
+from aiogram.filters import StateFilter
 
 from pathlib import Path
 import re
@@ -14,32 +15,49 @@ from utils.check_audio import check_audio
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 IMG_DIR = BASE_DIR / "bot" / "assets" / "img"
 
-# Faqat bitta set
+# 10 ta set (matn, rasm)
 sozlar = [
     ("Savat Asal Gilos", "savat.png"),
+    ("Zina Uzum Xo'roz", "zina.png"),
+    ("Shaftoli Qoshiq Quyosh", "shaftoli.png"),
+    ("Choynak Arg'imchoq uch", "choynak.png"),
+    ("Jo'ja Zanjir Toj", "joja.png"),
+    ("Likop Bulut Stol", "likopcha.png"),
+    ("Ruchka Arra Bir", "ruchka.png"),
+    ("Kitob Ukki Chelak", "kitob.png"),
+    ("Gilos Sigir Barg", "gilos.png"),
+    ("Qovun Baqlajon Tovuq", "qovun.png"),
 ]
 
 EXPECTED_REPEATS = 2  # har bir so‘z kamida 2 marta aytilishi kerak
 
 class Diagnostika(StatesGroup):
     test1 = State()
+    test2 = State()
+    test3 = State()
+    test4 = State()
+    test5 = State()
+    test6 = State()
+    test7 = State()
+    test8 = State()
+    test9 = State()
+    test10 = State()
 
 diagnostika = Router(name="diagnostika")
 
+# -------------------- YORDAMCHI FUNKSIYALAR --------------------
 
 def _normalize(t: str) -> str:
     """So‘zlarni tekshiruv uchun soddalashtirish (punktuatsiyasiz, kichik harf)."""
     t = (t or "").lower()
     t = t.replace("’", "'").replace("`", "'").replace("ʻ", "'").replace("ʼ", "'")
-    # faqat harf va raqam qoldiramiz
+    # faqat harf/raqam va bo'shliq qoldiramiz
     t = re.sub(r"[^a-zа-яёҳқғў0-9'\s]", " ", t, flags=re.IGNORECASE)
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
-
 def _count_word_occurrences(text: str, word: str) -> int:
     return len(re.findall(rf"\b{re.escape(word)}\b", text))
-
 
 def _lev_distance(a: str, b: str) -> int:
     la, lb = len(a), len(b)
@@ -58,7 +76,6 @@ def _lev_distance(a: str, b: str) -> int:
             )
     return dp[la][lb]
 
-
 def _closest_token(target: str, tokens: list[str]) -> tuple[str, int]:
     best = ("", 10**9)
     for tok in tokens:
@@ -66,7 +83,6 @@ def _closest_token(target: str, tokens: list[str]) -> tuple[str, int]:
         if d < best[1]:
             best = (tok, d)
     return best
-
 
 def _char_diff(a: str, b: str) -> str:
     diff = []
@@ -82,47 +98,51 @@ def _char_diff(a: str, b: str) -> str:
             diff.append(f"[→{b[j1:j2]}]")
     return "".join(diff)
 
+def _state_to_index(state_str: str) -> int:
+    # "Diagnostika:test3" -> 2 (0-based)
+    name = state_str.split(":")[-1]  # "test3"
+    n = int(name[4:])
+    return n - 1
 
-@diagnostika.message(F.text == "Diagnostika qilish")
-async def diagnostika_start(message: types.Message, state: FSMContext):
-    await state.set_state(Diagnostika.test1)
-    await state.update_data(test1=sozlar[0][0])  # "Savat Asal Gilos"
+def _format_instruction(title: str) -> str:
+    """
+    Ko‘rsatma matnini rasmga mos uchta so‘z bilan quradi:
+    - W1, W1.
+    - W2, W2.
+    - W3, W3.
+      YOKI
+    - W1, W2, W3.
+    - W1, W2, W3.
+    """
+    parts = title.split()
+    # ehtiyot chorasi: agar >=3 bo'lmasa ham ishlashi uchun
+    w1 = parts[0] if len(parts) > 0 else ""
+    w2 = parts[1] if len(parts) > 1 else ""
+    w3 = parts[2] if len(parts) > 2 else ""
 
+    return (
+        "<blockquote>"
+        "Ushbu rasmlar nomini 2 martadan, mikrofonni to‘xtatmagan holda quyidagi shaklardan birini tanlab talaffuz qiling.\n"
+        f"{w1}, {w1}.\n"
+        f"{w2}, {w2}.\n"
+        f"{w3}, {w3}.\n"
+        "<b>YOKI</b>\n"
+        f"{w1}, {w2}, {w3}.\n"
+        f"{w1}, {w2}, {w3}.\n\n"
+        "Talaffuz vaqtida tekshiriluvchi mustaqil talaffuzni amalga oshirishi zarur. Boshqa shovqinlar aralashishi taqiqlanadi."
+        "</blockquote>"
+    )
+
+async def _send_step_photo(message: types.Message, step_index: int):
+    title, img = sozlar[step_index]
     await message.answer_photo(
-        FSInputFile(IMG_DIR / sozlar[0][1]),
-        caption=(
-            "<blockquote>Ushbu rasmlar nomini 2 martadan, mikrofonni to‘xtatmagan holda takrorlang.\n"
-            "(Savat, savat ,Asal, asal ,Gilos, gilos  yoki Savat asal gilos Savat asal gilos shaklida aytishingiz mumkin)</blockquote>"
-        ),
+        FSInputFile(IMG_DIR / img),
+        caption=_format_instruction(title),
         parse_mode=ParseMode.HTML,
     )
 
-
-@diagnostika.message(Diagnostika.test1, F.audio | F.voice)
-async def echo_audio(message: types.Message, state: FSMContext):
-    await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_voice")
-
-    try:
-        file_id = message.voice.file_id if message.voice else message.audio.file_id
-        file = await message.bot.get_file(file_id)
-        file_bytes = await message.bot.download_file(file.file_path)
-    except Exception:
-        await message.answer("Faylni yuklab olishda xatolik. Qayta urinib ko‘ring.")
-        return
-
-    data = await state.get_data()
-    expected_phrase = data.get("test1", sozlar[0][0])
-
-    try:
-        stt_text = stt(file_bytes.getvalue())["result"]["text"]
-    except Exception:
-        await message.answer("Audio matnga aylantirishda xatolik. Yana urinib ko‘ring.")
-        return
-
-    if not stt_text or not stt_text.strip():
-        await message.answer("Ovozdan matn aniqlanmadi. Iltimos, so‘zlarni aniqroq takrorlang.")
-        return
-
+def _evaluate(expected_phrase: str, stt_text: str):
+    """Bitta bosqich (rasm) bo‘yicha natijani hisoblaydi."""
     try:
         check_ok = check_audio(expected_phrase, stt_text)
     except Exception:
@@ -137,42 +157,199 @@ async def echo_audio(message: types.Message, state: FSMContext):
 
     none_matched = all(c == 0 for c in per_word_counts.values())
     all_good = all(c >= EXPECTED_REPEATS for c in per_word_counts.values())
+    pass_ok = all_good or (str(check_ok) == "True")
 
-    await state.clear()
+    diffs_info = []
+    if rec_tokens:
+        for w in exp_words:
+            c = per_word_counts[w]
+            if c < EXPECTED_REPEATS:
+                closest, dist = _closest_token(w, rec_tokens)
+                diff = _char_diff(w, closest)
+                diffs_info.append((w, closest, dist, diff))
 
-    if all_good or str(check_ok) == "True":
-        await message.answer("✅ Tabriklaymiz! Siz so‘zlarni to‘g‘ri takrorladingiz.")
-        return
+    return {
+        "pass_ok": pass_ok,
+        "none_matched": none_matched,
+        "all_good": all_good,
+        "per_word_counts": per_word_counts,
+        "diffs_info": diffs_info,
+        "stt_text": stt_text.strip(),
+        "exp_words": exp_words,
+    }
 
-    if none_matched:
-        await message.answer(
+def _format_step_report(result: dict, expected_phrase: str) -> str:
+    """Bir bosqich uchun chiroyli matnli hisobot."""
+    if result["none_matched"]:
+        return (
             "<blockquote>Umuman mos kelmadi: kutilgan so‘zlardan birortasi topilmadi.\n"
             f"Kutilgan: {expected_phrase}</blockquote>\n\n"
-            f"🔎 Sizning talaffuzingiz :\n<code>{stt_text.strip()}</code>",
-            parse_mode=ParseMode.HTML,
+            f"🔎 Sizning talaffuzingiz:\n<code>{result['stt_text']}</code>"
         )
+
+    # so‘zlar bo‘yicha sanash
+    lines = []
+    for w in result["exp_words"]:
+        c = result["per_word_counts"].get(w, 0)
+        mark = "✅" if c >= EXPECTED_REPEATS else "❌"
+        lines.append(f"{mark} {w}: {c}/{EXPECTED_REPEATS}")
+    counts_block = "\n".join(lines)
+
+    # harf/tovush farqlari
+    if result["pass_ok"] and not result["diffs_info"]:
+        diffs_block = "100% moslik"
+    elif result["diffs_info"]:
+        diffs_block = "\n".join(
+            [f"• {w} ↔ {closest}  (lev={dist})\n  harf-farqlar: {diff}"
+             for (w, closest, dist, diff) in result["diffs_info"]]
+        )
+    else:
+        diffs_block = "—"
+
+    status = "✅ To‘g‘ri" if result["pass_ok"] else "❌ Xatolik bor"
+    return (
+        "<blockquote>"
+        f"Natija (shu rasm bo‘yicha): {status}\n\n"
+        f"{counts_block}\n\n"
+        f"🔎 Sizning talaffuzingiz:\n<code>{result['stt_text']}</code>\n\n"
+        f"📉 Tovush/harf darajasidagi farqlar:\n{diffs_block}</blockquote>"
+    )
+
+def _format_final_summary(stats: dict) -> str:
+    """
+    Umumiy yakuniy hisobot:
+    - Bosqich raqamlari o‘rniga muammo bo‘lgan so‘z(lar) aggregatsiyasi (min count) ko‘rsatiladi.
+    """
+    total = len(sozlar)
+    ok = len(stats["passed"])
+    bad = len(stats["failed"])
+
+    agg: dict[str, int] = {}
+    for _, wc in stats["failed_words_per_step"].items():
+        for w, c in wc.items():
+            if w not in agg:
+                agg[w] = c
+            else:
+                agg[w] = min(agg[w], c)
+
+    lines = [f"📊 Umumiy natija: {ok}/{total} bosqich muvaffaqiyatli."]
+
+    if agg:
+        lines.append("\n❌ Muammo bo‘lgan so‘z(tovush)lar:")
+        for w in sorted(agg.keys()):
+            c = agg[w]
+            lines.append(f"  • {w}: {c}/{EXPECTED_REPEATS}")
+    else:
+        lines.append("\nA’lo! Hech qanday xatolik topilmadi.")
+
+    return "<blockquote>" + "\n".join(lines) + "</blockquote>"
+
+# -------------------- BOSHLASH --------------------
+
+@diagnostika.message(F.text == "Diagnostika qilish")
+async def diagnostika_start(message: types.Message, state: FSMContext):
+    # Step1 holatini o‘rnatamiz va kutilayotgan matnni saqlaymiz
+    await state.set_state(Diagnostika.test1)
+    await state.update_data(test1=sozlar[0][0])
+
+    # Umumiy statistika konteynerlari
+    await state.update_data(_passed=[], _failed=[], _failed_words_per_step={})
+
+    # 1-rasmni yuboramiz
+    await _send_step_photo(message, 0)
+
+# -------------------- AUDIO HANDLER (barcha 10 holatga umumiy) --------------------
+
+@diagnostika.message(
+    StateFilter(
+        Diagnostika.test1, Diagnostika.test2, Diagnostika.test3, Diagnostika.test4, Diagnostika.test5,
+        Diagnostika.test6, Diagnostika.test7, Diagnostika.test8, Diagnostika.test9, Diagnostika.test10
+    ),
+    F.audio | F.voice
+)
+async def handle_step_audio(message: types.Message, state: FSMContext):
+    await message.bot.send_chat_action(chat_id=message.chat.id, action="upload_voice")
+
+    # Audio/voice faylni olib kelamiz
+    try:
+        file_id = message.voice.file_id if message.voice else message.audio.file_id
+        file = await message.bot.get_file(file_id)
+        file_bytes = await message.bot.download_file(file.file_path)
+    except Exception:
+        await message.answer("Faylni yuklab olishda xatolik. Qayta urinib ko‘ring.")
         return
 
-    # Har bir so‘zga hisobot
-    counts_info = []
-    diffs_info = []
-    for w in exp_words:
-        c = per_word_counts[w]
-        mark = "✅" if c >= EXPECTED_REPEATS else "❌"
-        counts_info.append(f"{mark} {w}: {c}/{EXPECTED_REPEATS}")
-        if c < EXPECTED_REPEATS and rec_tokens:
-            closest, dist = _closest_token(w, rec_tokens)
-            diff = _char_diff(w, closest)
-            diffs_info.append(f"• {w} ↔ {closest}  (lev={dist})\n  harf-farqlar: {diff}")
+    # Hozirgi step indeksini topamiz
+    cur_state = await state.get_state()
+    idx = _state_to_index(cur_state)  # 0..9
 
-    counts_block = "\n".join(counts_info)
-    diffs_block = "\n".join(diffs_info)
+    data = await state.get_data()
+    expected_key = f"test{idx+1}"
+    expected_phrase = data.get(expected_key, sozlar[idx][0])
 
-    # ✅ Endi STT matn + farqlar bitta xabarda chiroyli chiqadi
-    await message.answer(
-        "<blockquote>Sizda xatoliklar bor:\n\n"
-        f"{counts_block}\n\n"
-        f"🔎 STT matn:\n<code>{stt_text.strip()}</code>\n\n"
-        f"📉 Tovush/harf darajasidagi farqlar:\n{diffs_block}</blockquote>",
-        parse_mode=ParseMode.HTML,
+    # STT
+    try:
+        stt_text = stt(file_bytes.getvalue())["result"]["text"]
+    except Exception:
+        await message.answer("Audio matnga aylantirishda xatolik. Yana urinib ko‘ring.")
+        return
+
+    if not stt_text or not stt_text.strip():
+        await message.answer("Ovozdan matn aniqlanmadi. Iltimos, so‘zlarni aniqroq takrorlang.")
+        return
+
+    # Baholash
+    result = _evaluate(expected_phrase, stt_text)
+
+    # Hisobotni chiqaramiz (shu rasm bo‘yicha)
+    await message.answer(_format_step_report(result, expected_phrase), parse_mode=ParseMode.HTML)
+
+    # Umumiy statistikaga yozib boramiz
+    passed = data.get("_passed", [])
+    failed = data.get("_failed", [])
+    failed_words_per_step = data.get("_failed_words_per_step", {})
+
+    if result["pass_ok"]:
+        passed.append(idx)
+    else:
+        failed.append(idx)
+        # qaysi so‘z(lar) kam bo‘lgan — ularning faktik sanog‘ini saqlaymiz
+        word_counts = {}
+        for w in result["exp_words"]:
+            c = result["per_word_counts"].get(w, 0)
+            if c < EXPECTED_REPEATS:
+                word_counts[w] = c
+        if word_counts:
+            failed_words_per_step[idx] = word_counts
+
+    await state.update_data(_passed=passed, _failed=failed, _failed_words_per_step=failed_words_per_step)
+
+    # Keyingisiga o'tamiz yoki yakunlaymiz
+    if idx < 9:
+        # Keyingi stepga o'tish
+        next_index = idx + 1
+        next_state = getattr(Diagnostika, f"test{next_index+1}")
+        await state.set_state(next_state)
+        await state.update_data(**{f"test{next_index+1}": sozlar[next_index][0]})
+        await _send_step_photo(message, next_index)
+    else:
+        # Yakuniy hisobot (tovush/so'zlar kesimida)
+        summary_data = await state.get_data()
+        final_stats = {
+            "passed": summary_data.get("_passed", []),
+            "failed": summary_data.get("_failed", []),
+            "failed_words_per_step": summary_data.get("_failed_words_per_step", {}),
+        }
+        await message.answer(_format_final_summary(final_stats), parse_mode=ParseMode.HTML)
+        await state.clear()
+
+# -------------------- No-audio holatda ogohlantirish --------------------
+
+@diagnostika.message(
+    StateFilter(
+        Diagnostika.test1, Diagnostika.test2, Diagnostika.test3, Diagnostika.test4, Diagnostika.test5,
+        Diagnostika.test6, Diagnostika.test7, Diagnostika.test8, Diagnostika.test9, Diagnostika.test10
     )
+)
+async def only_audio_warning(message: types.Message):
+    await message.answer("Iltimos, voice yoki audio yuboring 🎙️")
