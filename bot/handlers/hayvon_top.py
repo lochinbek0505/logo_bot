@@ -1,185 +1,207 @@
+from __future__ import annotations
+
+import os
+import random
+from typing import List, Dict, Tuple
+from urllib.parse import urljoin
+
+import aiohttp
 from aiogram import Router, F, types
-
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types.input_file import FSInputFile 
-
-from utils.mohir import stt
-
-from utils.check_audio import check_audio
+from aiogram.enums.parse_mode import ParseMode
+from aiogram.types.input_file import BufferedInputFile
 from aiogram.utils.media_group import MediaGroupBuilder
 
-from aiogram.types import FSInputFile
-from aiogram.enums.parse_mode import ParseMode
-from .inllines import hayvon_inline_buttons, hayvonlar_ichidan_top_inline
+from .inllines import hayvonlar_ichidan_top_inline  # sizdagi inline tugmalar yordamchisi
 
-from pathlib import Path
+# ===================== Config =====================
+# Admin API: /export/hayvon quyidagilarni qaytaradi:
+# [{"key","title","group","image_url","audio_url"}, ...]
+ADMIN_BASE = os.getenv("ADMIN_BASE", "http://127.0.0.1:8099")
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
-IMG_DIR = BASE_DIR / "bot" / "assets" / "hayvon_imgs"
-AUD_DIR = BASE_DIR / "bot" / "assets" / "hayvon_audio"
-
-hayvonlar_dict = {
-"ayiq" :("ayiq.png", "ayiq.mp3", "Ayiq"),
-"bori" : ("bori.png", "bori.mp3", "Bo'ri"),
-"echki": ("echki.png", "echki.mp3", "Echki"), 
-"eshak": ("eshak.png", "eshak.mp3", "Eshak"), 
-"goz": ("goz.png", "goz.mp3", "G'oz"),
-"ilon": ("ilon.png", "ilon.mp3", "Ilon"),
-"kuchuk": ("kuchuk.png", "kuchuk.mp3", "Kuchuk"),
-"maymun": ("maymun.png", "maymun.mp3", "Maymun"),
-"mushuk": ("mushuk.png", "mushuk.mp3", "Mushuk"),
-"ot": ("ot.png", "ot.mp3", "Ot"),
-"sher": ("sher.png", "sher.mp3", "Sher"),
-"sigir": ("sigir.png", "sigir.mp3", "Sigir"),
-"tovuq": ("tovuq.png", "tovuq.mp3", "Tovuq"),
-"tulki": ("tulki.png", "tulki.mp3", "Tulki"),
-"xoroz": ("xoroz.png", "xoroz.mp3", "Xo'roz"),
-"yolbars": ("yolbars.png", "yolbars.mp3", "Yo'lbars"),
-}
-
-hayvonlar_dict = [
-    {
-        "ayiq": ("ayiq.png", "ayiq.mp3", "Ayiq"),
-        "bori": ("bori.png", "bori.mp3", "Bo'ri"),
-        "echki": ("echki.png", "echki.mp3", "Echki"),
-        "eshak": ("eshak.png", "eshak.mp3", "Eshak"),
-        "goz": ("goz.png", "goz.mp3", "G'oz"),
-        "ilon": ("ilon.png", "ilon.mp3", "Ilon"),
-        "kuchuk": ("kuchuk.png", "kuchuk.mp3", "Kuchuk"),
-        "maymun": ("maymun.png", "maymun.mp3", "Maymun"),
-        "mushuk": ("mushuk.png", "mushuk.mp3", "Mushuk"),
-        "ot": ("ot.png", "ot.mp3", "Ot"),
-        "sher": ("sher.png", "sher.mp3", "Sher"),
-        "sigir": ("sigir.png", "sigir.mp3", "Sigir"),
-        "tovuq": ("tovuq.png", "tovuq.mp3", "Tovuq"),
-        "tulki": ("tulki.png", "tulki.mp3", "Tulki"),
-        "xoroz": ("xoroz.png", "xoroz.mp3", "Xo'roz"),
-        "yolbars": ("yolbars.png", "yolbars.mp3", "Yo'lbars"),
-        "ari": ("ari.png", "ari.mp3", "Ari"),
-        "chigirtka": ("chigirtka.png", "chigirtka.mp3", "Chigirtka")
-    },
-    {
-        "basketbol": ("basketbol.png", "basketbol.mp3", "Basketbol"),
-        "kulish": ("kulish.png", "kulish.mp3", "Kulish"),
-        "kuylash": ("kuylash.png", "kuylash.mp3", "Kuylash"),
-        "opish": ("opish.png", "opish.mp3", "Opish"),
-        "tish_yuvish": ("tish_yuvish.png", "tish_yuvish.mp3", "Tish Yuvish"),
-        "yugurish": ("yugurish.png", "yugurish.mp3", "Yugurish"),
-        "yurmoq": ("yurmoq.png", "yurmoq.mp3", "Yurish")
-    },
-    {
-        "mashina": ("mashina.png", "mashina.mp3", "Mashina"),
-        "metro": ("metro.png", "metro.mp3", "Metro"),
-        "poyezd": ("poyezd.png", "poyezd.mp3", "Poyezd"),
-        "vertalyot": ("vertalyot.png", "vertalyot.mp3", "Vertolyot")
-    },
-    {
-        "chaqmoq": ("chaqmoq.png", "chaqmoq.mp3", "Chaqmoq"),
-        "shamol": ("shamol.png", "shamol.mp3", "Shamol"),
-        "yomgir": ("yomgir.png", "yomgir.mp3", "Yomgʻir")
-    },
-    {
-        'aksirish': ('aksirish.png', 'aksirish.mp3', 'Aksiruv'),
-        'chivin': ('chivin.png', 'chivin.mp3', 'Chivin'),
-        'hurrak': ('hurrak.png', 'hurrak.mp3', 'Hurrak'),
-        'kema': ('kema.png', 'kema.mp3', 'Kema'),
-        'ninachi': ('ninachi.png', 'ninachi.mp3', 'Ninachish'),
-        'pasha': ('pasha.png', 'pasha.mp3', 'Pashash'),
-        'qarsak': ('qarsak.png', 'qarsak.mp3', 'Qarsak'),
-        'sharshara': ('sharshara.png', 'sharshara.mp3', 'Sharshara'),
-        'shuttak': ('shuttak.png', 'shuttak.mp3', 'Shuttak'),
-        'suv_oynash': ('suv_oynash.png', 'suv_oynash.mp3', 'Suv Oʻynash'),
-        'tishlash': ('tishlash.png', 'tishlash.mp3', 'Tishlash'),
-        'tolqin': ('tolqin.png', 'tolqin.mp3', 'Tolqin'),
-        'yiglamoq': ('yiglamoq.png', 'yiglamoq.mp3', 'Yigʻlash'),
-        'yotalmoq': ('yotalmoq.png', 'yotalmoq.mp3', "Yo'talish")
-    }
-]
-
-def get_third_element_by_key(key, data_list):
-    for dictionary in data_list:
-        if key in dictionary:
-            return dictionary[key][2]
-    return None
-
-
+# Admin'ning group enumlari: animal, action, transport, nature, misc
+MIN_CHOICES = 3  # bitta raundda nechta surat ko'rsatiladi
 
 hayvontop = Router(name="hayvontop")
 
-import random
 
-# @hayvontop.message(F.text == "hayvontop")
-# async def diagnostika_start(message: types.Message, state: FSMContext):
-#     images = [i[0] for i in sozlar]
-#     audios = [i[1] for i in sozlar]
-#     random.shuffle(images)
-#     random.shuffle(audios)
-    
-#     image = images[0]
-#     audio = audios[0]
-    
-#     await message.answer_photo(FSInputFile("bot/assets/hayvon_imgs/" + image),
-#                                caption= "<blockquote>shu rasmdagi hayvon audio ga to'g'ri keladimi? \n" \
-#                            "3 martadan takrorlang bitta audioda</blockquote>", parse_mode=ParseMode.HTML)
-    
-#     await message.answer_audio(FSInputFile("bot/assets/hayvon_audio/" + audio), caption="Bu rasm audio bilan mos tushadimi? ", reply_markup=hayvon_inline_buttons(image=image, audio=audio))
+# ===================== Admin API helpers =====================
+async def _http_json(url: str) -> list[dict]:
+    timeout = aiohttp.ClientTimeout(total=25)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        async with s.get(url) as r:
+            r.raise_for_status()
+            return await r.json()
+
+async def _download_bytes(url: str) -> tuple[bytes, str]:
+    timeout = aiohttp.ClientTimeout(total=25)
+    headers = {"User-Agent": "hayvontop-bot/1.0"}
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as s:
+        async with s.get(url) as r:
+            r.raise_for_status()
+            return await r.read(), r.headers.get("Content-Type", "")
+
+async def fetch_hayvon_items() -> list[dict]:
+    url = f"{ADMIN_BASE}/export/hayvon"
+    data = await _http_json(url)
+    # to'liq URL'ga aylantirib beramiz
+    items = []
+    for d in data:
+        key = (d.get("key") or "").strip()
+        title = (d.get("title") or "").strip()
+        group = (d.get("group") or "").strip()
+        img_rel = (d.get("image_url") or "").strip()
+        aud_rel = (d.get("audio_url") or "").strip()
+        if not (key and title and group and img_rel and aud_rel):
+            continue
+        items.append({
+            "key": key,
+            "title": title,
+            "group": group,
+            "image_url": urljoin(ADMIN_BASE, img_rel),
+            "audio_url": urljoin(ADMIN_BASE, aud_rel),
+        })
+    return items
 
 
+# ===================== Round builder =====================
+def group_items(items: list[dict]) -> dict[str, list[dict]]:
+    g: dict[str, list[dict]] = {}
+    for it in items:
+        g.setdefault(it["group"], []).append(it)
+    return g
 
-# @hayvontop.callback_query(F.data.startswith("hayvontop"))
-# async def tekshir(query: types.CallbackQuery):
-#     data = query.data.split(":")
-#     print(data[1].strip(".png"),data[2].strip(".mp3"), data[3])
-#     if ((data[1].strip(".png") == data[2].strip(".mp3")) and data[3] == "1") or \
-#         ((data[1].strip(".png") != data[2].strip(".mp3")) and data[3] == "0"):
-#         await query.message.delete()
-#         await query.message.answer(text="Sizning javobingiz to'g'ri tabriklayman 😃")
-#     else:
-#         await query.message.delete()
-#         await query.message.answer(text="Sizning javobingiz afsuski noto'g'ri ☹️")
-        
+def pick_round(grouped: dict[str, list[dict]], k: int = MIN_CHOICES) -> tuple[list[dict], dict]:
+    """
+    Tasodifiy guruhdan kamida k ta element tanlaydi.
+    Natija:
+      choices: uzunligi k bo'lgan itemlar ro'yxati
+      answer: to'g'ri item (choices ichidan)
+    """
+    # guruhlar ichidan kamida k ta bo'lganlarni tanlaymiz
+    candidates = [g for g in grouped.values() if len(g) >= k]
+    if not candidates:
+        raise RuntimeError("Yetarli material yo'q (kamida 1 guruhda 3+ element bo‘lishi kerak).")
+    bunch = random.choice(candidates).copy()
+    random.shuffle(bunch)
+    choices = bunch[:k]
+    answer = random.choice(choices)
+    random.shuffle(choices)
+    return choices, answer
 
 
-@hayvontop.message(F.text=="Eshituv idrokini rivojlanitrish")
+# ===================== UI helpers =====================
+def _infer_ext_from_ct(ct: str | None, fallback: str) -> str:
+    ct_l = (ct or "").lower()
+    if "png" in ct_l:   return ".png"
+    if "webp" in ct_l:  return ".webp"
+    if "gif" in ct_l:   return ".gif"
+    if "mp3" in ct_l:   return ".mp3"
+    if "ogg" in ct_l:   return ".ogg"
+    if "mpeg" in ct_l:  return ".mp3"
+    return fallback
+
+async def _build_media_group(choices: list[dict]) -> MediaGroupBuilder:
+    """
+    3 ta rasmni bytes qilib olib, media group qaytaradi.
+    O'rtadagi (index 1) ga caption qo'yamiz.
+    """
+    mg = MediaGroupBuilder()
+    for i, it in enumerate(choices):
+        img_bytes, ct = await _download_bytes(it["image_url"])
+        ext = _infer_ext_from_ct(ct, ".jpg")
+        photo = BufferedInputFile(img_bytes, filename=f"{it['key']}{ext}")
+        mg.add(
+            type="photo",
+            media=photo,
+            caption="<blockquote>Shu rasmlardan audio mosini tanlang</blockquote>" if i == 1 else None,
+            parse_mode=ParseMode.HTML if i == 1 else None
+        )
+    return mg
+
+
+# ===================== Game handler =====================
+@hayvontop.message(F.text.in_({"Eshituv idrokini rivojlanitrish", "Eshituv idrokini rivojlantirish"}))
 async def hayvonartop(message: types.Message, state: FSMContext):
+    """
+    1 raund: 3 ta rasm (bir guruh), 1 ta audio (o'sha guruhdan to'g'ri javob).
+    Inline tugmalarda item.key'lar bo'ladi.
+    """
     await state.clear()
-    global hayvonlar_dict
-    
-    sozlar = hayvonlar_dict
-    
-    
-    random.shuffle(sozlar)
-    sozlar = list(sozlar[0].items())
-    random.shuffle(sozlar)
-    
-    hayvonlar = sozlar[:3]
-    right_index = random.randint(0, 2)
-    buttons = hayvonlar_ichidan_top_inline([i[0] for i in hayvonlar], right=hayvonlar[right_index][0])
-    
-    
-    media = MediaGroupBuilder()
-    files = [FSInputFile(IMG_DIR / image[1][0])
-            for image in hayvonlar
-    ]
-    
-    for n, i in enumerate(files):
-        
-        media.add(type="photo", media = i, caption= "<blockquote>shu rasmlardan audio mosini tanlang </blockquote>" if n == 1 else None, parse_mode=ParseMode.HTML)
-    
+
+    # 1) Admin'dan materiallar
+    try:
+        items = await fetch_hayvon_items()
+    except Exception as e:
+        await message.answer(f"Ma'lumotlarni olishda xatolik: {e}")
+        return
+
+    if len(items) < MIN_CHOICES:
+        await message.answer("Materiallar yetarli emas. Admin panel orqali qo‘shing (kamida 3 ta).")
+        return
+
+    grouped = group_items(items)
+
+    try:
+        choices, answer = pick_round(grouped, k=MIN_CHOICES)
+    except Exception as e:
+        await message.answer(str(e))
+        return
+
+    # 2) 3 ta rasm (media group)
+    media = await _build_media_group(choices)
     await message.answer_media_group(media.build())
-    await message.answer_voice(FSInputFile(AUD_DIR / sozlar[right_index][1][1], filename=sozlar[right_index][1][1]), reply_markup=buttons)
-    
-    
-    
+
+    # 3) Audio (to'g'ri javobning audio' si)
+    aud_bytes, act = await _download_bytes(answer["audio_url"])
+    aext = _infer_ext_from_ct(act, ".mp3")
+    voice = BufferedInputFile(aud_bytes, filename=f"{answer['key']}{aext}")
+
+    # 4) Inline tugmalar
+    option_keys = [it["key"] for it in choices]
+    buttons = hayvonlar_ichidan_top_inline(option_keys, right=answer["key"])
+
+    # 5) Voice yuborish
+    await message.answer_voice(voice, caption="Bu audio qaysi rasmga mos?", reply_markup=buttons)
+
+    # 6) Callback'da ishlatish uchun mapping/state saqlab qo'yamiz
+    #    (key -> title) va javob kaliti
+    key_title = {it["key"]: it["title"] for it in items}
+    await state.update_data(
+        _key_title=key_title,
+        _last_correct=answer["key"]
+    )
+
+
+# ===================== Callback natija =====================
 @hayvontop.callback_query(F.data.startswith("hayvonlartop"))
-async def natija(query: types.CallbackQuery):
+async def natija(query: types.CallbackQuery, state: FSMContext):
     await query.answer()
-    data= query.data.split(":")
-    
-    if data[1] == data[2]:
-        await query.message.delete()
-        await query.message.answer(f"Sizning javobingiz to'g'ri tabriklayman 😃 \nbu rostanham {get_third_element_by_key(data[2], hayvonlar_dict)} edi")
+
+    # kutilgan format: "hayvonlartop:<selected_key>:<correct_key>"
+    try:
+        _, selected, correct = query.data.split(":")
+    except ValueError:
+        await query.message.answer("Noto‘g‘ri format.")
+        return
+
+    data = await state.get_data()
+    key_title: Dict[str, str] = data.get("_key_title", {})
+
+    sel_title = key_title.get(selected, selected)
+    cor_title = key_title.get(correct, correct)
+
+    await query.message.delete()
+
+    if selected == correct:
+        await query.message.answer(
+            f"Sizning javobingiz to‘g‘ri — tabriklayman 😃\n"
+            f"Bu rostan ham <b>{cor_title}</b> edi.",
+            parse_mode=ParseMode.HTML
+        )
     else:
-        await query.message.delete()
-        await query.message.answer(f"Sizning javobingiz afsuski noto'g'ri ☹️ \nbu bu {get_third_element_by_key(data[2], hayvonlar_dict)} edi")
+        await query.message.answer(
+            f"Sizning javobingiz afsuski noto‘g‘ri ☹️\n"
+            f"To‘g‘ri javob: <b>{cor_title}</b>.",
+            parse_mode=ParseMode.HTML
+        )
