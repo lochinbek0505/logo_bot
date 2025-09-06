@@ -18,7 +18,7 @@ from utils.mohir import stt
 from utils.check_audio import check_audio
 
 # ===================== Konfiguratsiya =====================
-ADMIN_BASE = os.getenv("ADMIN_BASE", "http://127.0.0.1:8099")
+ADMIN_BASE = os.getenv("ADMIN_BASE", "http://127.0.0.1:8001")
 EXPECTED_REPEATS = int(os.getenv("EXPECTED_REPEATS", "2"))
 
 # ===================== FSM =====================
