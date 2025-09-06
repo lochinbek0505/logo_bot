@@ -7,7 +7,7 @@ from typing import List, Dict, Any
 import aiohttp
 
 
-ADMIN_BASE = os.getenv("ADMIN_BASE", "http://127.0.0.1:80001")
+ADMIN_BASE = os.getenv("ADMIN_BASE", "http://127.0.0.1:8001")
 
 
 class AdminClient:
