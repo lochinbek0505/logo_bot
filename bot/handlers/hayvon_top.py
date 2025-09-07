@@ -17,7 +17,7 @@ from .inllines import hayvonlar_ichidan_top_inline  # sizdagi inline tugmalar yo
 # ===================== Config =====================
 # Admin API: /export/hayvon quyidagilarni qaytaradi:
 # [{"key","title","group","image_url","audio_url"}, ...]
-ADMIN_BASE = os.getenv("ADMIN_BASE", "http://127.0.0.1:8001")
+ADMIN_BASE = os.getenv("ADMIN_BASE", "http://185.217.131.39/")
 
 # Admin'ning group enumlari: animal, action, transport, nature, misc
 MIN_CHOICES = 3  # bitta raundda nechta surat ko'rsatiladi
@@ -121,7 +121,7 @@ async def _build_media_group(choices: list[dict]) -> MediaGroupBuilder:
 
 
 # ===================== Game handler =====================
-@hayvontop.message(F.text.in_({"Eshituv idrokini rivojlanitrish", "Eshituv idrokini rivojlantirish"}))
+@hayvontop.message(F.text.in_({"🎧 Eshituv idrokini rivojlantirish", "🎧 Eshituv idrokini rivojlantirish"}))
 async def hayvonartop(message: types.Message, state: FSMContext):
     """
     1 raund: 3 ta rasm (bir guruh), 1 ta audio (o'sha guruhdan to'g'ri javob).

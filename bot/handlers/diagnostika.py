@@ -3,8 +3,9 @@ from __future__ import annotations
 import os
 import re
 import difflib
+import logging
 from urllib.parse import urljoin
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Any
 
 import aiohttp
 from aiogram import Router, F, types
@@ -12,13 +13,30 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.enums.parse_mode import ParseMode
 from aiogram.filters import StateFilter
-from aiogram.types.input_file import BufferedInputFile  # <--- qo'shildi
+from aiogram.types.input_file import BufferedInputFile
 
 from utils.mohir import stt
 from utils.check_audio import check_audio
 
+# ===================== Logging =====================
+LOG_LEVEL = os.getenv("DIAG_LOG_LEVEL", "INFO").upper()
+log = logging.getLogger("diagnostika")
+if not log.handlers:
+    # Agar umumiy logging main.py da sozlanmagan bo'lsa, hech bo'lmasa konsolga yozib tursin
+    handler = logging.StreamHandler()
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+    handler.setFormatter(fmt)
+    log.addHandler(handler)
+log.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+
 # ===================== Konfiguratsiya =====================
-ADMIN_BASE = os.getenv("ADMIN_BASE", "http://127.0.0.1:8001")
+# Eslatma: Admin API public GET endpointlari:
+#   /                 -> {"name":"Bot Admin API","ok":true}
+#   /export/diagnostika
+#   /export/hayvon
+#   /darslik (GET) , /export/darslik/{code}
+# Bular admin_app.py da aniq ko'rsatilgan.  :contentReference[oaicite:4]{index=4}
+ADMIN_BASE = os.getenv("ADMIN_BASE", "http://185.217.131.39").rstrip("/")
 EXPECTED_REPEATS = int(os.getenv("EXPECTED_REPEATS", "2"))
 
 # ===================== FSM =====================
@@ -28,24 +46,52 @@ class Diagnostika(StatesGroup):
 diagnostika = Router(name="diagnostika")
 
 # ===================== Admin API dan ma'lumot olish =====================
+async def _admin_healthcheck(base: str) -> tuple[bool, int, str]:
+    """ADMIN_BASE / ni tekshiradi va natijani logga yozadi."""
+    url = f"{base}/"
+    timeout = aiohttp.ClientTimeout(total=10)
+    headers = {"User-Agent": "diag-bot/1.0"}
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as s:
+            async with s.get(url) as r:
+                status = r.status
+                text = await r.text()
+                ok = 200 <= status < 300
+                log.info("DIAG health: GET %s -> %s | %s", url, status, text[:200].replace("\n", " "))
+                return ok, status, text
+    except Exception as e:
+        log.exception("DIAG health: FAILED %s: %s", url, e)
+        return False, 0, str(e)
+
 async def fetch_diagnostika_items() -> List[Tuple[str, str]]:
     """
     Admin API'dan diagnostika setlarini olamiz.
     Natija: [(phrase, image_full_url), ...]
     """
     url = f"{ADMIN_BASE}/export/diagnostika"
-    async with aiohttp.ClientSession() as sess:
-        async with sess.get(url, timeout=aiohttp.ClientTimeout(total=20)) as r:
-            r.raise_for_status()
-            data = await r.json()
-            items: List[Tuple[str, str]] = []
-            for d in data:
-                phrase = (d.get("phrase") or "").strip()
-                img_rel = (d.get("image_url") or "").strip()
-                if not phrase or not img_rel:
-                    continue
-                items.append((phrase, urljoin(ADMIN_BASE, img_rel)))
-            return items
+    timeout = aiohttp.ClientTimeout(total=20)
+    headers = {"User-Agent": "diag-bot/1.0"}
+    try:
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as sess:
+            async with sess.get(url) as r:
+                status = r.status
+                if status != 200:
+                    body = await r.text()
+                    log.error("DIAG items: GET %s -> %s | %s", url, status, body[:200])
+                r.raise_for_status()
+                data = await r.json()
+                items: List[Tuple[str, str]] = []
+                for d in data:
+                    phrase = (d.get("phrase") or "").strip()
+                    img_rel = (d.get("image_url") or "").strip()
+                    if not phrase or not img_rel:
+                        continue
+                    items.append((phrase, urljoin(ADMIN_BASE + "/", img_rel)))
+                log.info("DIAG items: received %d item(s)", len(items))
+                return items
+    except Exception as e:
+        log.exception("DIAG items: FAILED GET %s: %s", url, e)
+        raise
 
 # ===================== Matn tahlil yordamchi funksiyalar =====================
 def _normalize(t: str) -> str:
@@ -115,10 +161,11 @@ def _format_instruction(title: str) -> str:
         "</blockquote>"
     )
 
-def _evaluate(expected_phrase: str, stt_text: str) -> Dict:
+def _evaluate(expected_phrase: str, stt_text: str) -> Dict[str, Any]:
     try:
         check_ok = check_audio(expected_phrase, stt_text)
-    except Exception:
+    except Exception as e:
+        log.exception("DIAG check_audio failed: %s", e)
         check_ok = False
 
     norm_expected = _normalize(expected_phrase)
@@ -151,7 +198,7 @@ def _evaluate(expected_phrase: str, stt_text: str) -> Dict:
         "exp_words": exp_words,
     }
 
-def _format_step_report(result: Dict, expected_phrase: str) -> str:
+def _format_step_report(result: Dict[str, Any], expected_phrase: str) -> str:
     if result["none_matched"]:
         return (
             "<blockquote>Umuman mos kelmadi: kutilgan so‘zlardan birortasi topilmadi.\n"
@@ -185,7 +232,7 @@ def _format_step_report(result: Dict, expected_phrase: str) -> str:
         f"📉 Tovush/harf darajasidagi farqlar:\n{diffs_block}</blockquote>"
     )
 
-def _format_final_summary(stats: Dict) -> str:
+def _format_final_summary(stats: Dict[str, Any]) -> str:
     total = stats.get("total", 0)
     ok = len(stats.get("passed", []))
     agg: Dict[str, int] = {}
@@ -209,26 +256,18 @@ def _format_final_summary(stats: Dict) -> str:
 
 # ===================== Rasmni yuklab, fayl sifatida jo'natish =====================
 async def _download_bytes(url: str) -> tuple[bytes, str]:
-    """
-    URL dan faylni bytes ko'rinishida yuklab keladi.
-    Content-Type ni ham qaytaradi (ext tanlash uchun).
-    """
     timeout = aiohttp.ClientTimeout(total=25)
     headers = {"User-Agent": "diag-bot/1.0"}
     async with aiohttp.ClientSession(timeout=timeout, headers=headers) as s:
         async with s.get(url) as r:
+            log.info("DIAG photo: GET %s -> %s", url, r.status)
             r.raise_for_status()
             return await r.read(), r.headers.get("Content-Type", "")
 
 async def _send_step_photo(message: types.Message, step_index: int, items: List[Tuple[str, str]]):
-    """
-    URL yuborish o'rniga, rasmni o'zimiz yuklab (bytes) Telegramga fayl sifatida jo'natamiz.
-    Bu usul lokal yoki yopiq URLlarda ham ishonchli ishlaydi.
-    """
     title, img_url = items[step_index]
     try:
         data, ct = await _download_bytes(img_url)
-        # content-type'dan extension tanlaymiz
         ct_l = (ct or "").lower()
         if "png" in ct_l:
             ext = ".png"
@@ -245,13 +284,21 @@ async def _send_step_photo(message: types.Message, step_index: int, items: List[
             caption=_format_instruction(title),
             parse_mode=ParseMode.HTML,
         )
-    except Exception:
-        # Rasmni ola olmadik — kamida instruktsiyani yuboramiz
+        log.info("DIAG photo: sent step=%d title=%s", step_index, title)
+    except Exception as e:
+        log.exception("DIAG photo: FAILED step=%d url=%s: %s", step_index, img_url, e)
         await message.answer(_format_instruction(title), parse_mode=ParseMode.HTML)
 
 # ===================== Boshlash =====================
-@diagnostika.message(F.text == "Diagnostika qilish")
+# Eslatma: Reply-menyu tugmasi "📋 Diagnostika qilish" — ana shu matn bilan bog'lash kerak.  :contentReference[oaicite:5]{index=5}
+@diagnostika.message(F.text == "📋 Diagnostika qilish")
 async def diagnostika_start(message: types.Message, state: FSMContext):
+    # Avval healthcheck
+    ok, status, _ = await _admin_healthcheck(ADMIN_BASE)
+    if not ok:
+        await message.answer(f"Admin API bilan bog‘lanib bo‘lmadi (status={status}). Iltimos, qayta urinib ko‘ring.")
+        return
+
     try:
         items = await fetch_diagnostika_items()
     except Exception as e:
@@ -260,12 +307,14 @@ async def diagnostika_start(message: types.Message, state: FSMContext):
 
     if not items:
         await message.answer("Diagnostika setlari topilmadi. Admin paneldan qo‘shing.")
+        log.warning("DIAG start: empty items")
         return
 
     await state.update_data(_items=items, _idx=0, _passed=[], _failed=[], _failed_words_per_step={})
     await state.set_state(Diagnostika.running)
 
     await state.update_data(test_current=items[0][0])  # phrase
+    log.info("DIAG start: total=%d first_title=%s", len(items), items[0][0])
     await _send_step_photo(message, 0, items)
 
 # ===================== AUDIO handler (dinamik) =====================
@@ -279,6 +328,7 @@ async def handle_step_audio(message: types.Message, state: FSMContext):
 
     if not items:
         await message.answer("Sozlamalar topilmadi. /start dan qayta boshlang.")
+        log.warning("DIAG audio: items missing in state")
         await state.clear()
         return
 
@@ -287,7 +337,10 @@ async def handle_step_audio(message: types.Message, state: FSMContext):
         file_id = message.voice.file_id if message.voice else message.audio.file_id
         file = await message.bot.get_file(file_id)
         file_bytes = await message.bot.download_file(file.file_path)
-    except Exception:
+        raw = file_bytes.getvalue()
+        log.info("DIAG audio: downloaded bytes=%d", len(raw) if raw else 0)
+    except Exception as e:
+        log.exception("DIAG audio: download failed: %s", e)
         await message.answer("Faylni yuklab olishda xatolik. Qayta urinib ko‘ring.")
         return
 
@@ -295,17 +348,23 @@ async def handle_step_audio(message: types.Message, state: FSMContext):
 
     # 2) STT
     try:
-        stt_text = stt(file_bytes.getvalue())["result"]["text"]
-    except Exception:
+        res = stt(raw)
+        stt_text = res["result"]["text"]
+        log.info("DIAG stt: len=%d text='%s'", len(stt_text or ""), (stt_text or "")[:120])
+    except Exception as e:
+        log.exception("DIAG stt: failed: %s", e)
         await message.answer("Audio matnga aylantirishda xatolik. Yana urinib ko‘ring.")
         return
 
     if not stt_text or not stt_text.strip():
         await message.answer("Ovozdan matn aniqlanmadi. Iltimos, so‘zlarni aniqroq takrorlang.")
+        log.warning("DIAG stt: empty text")
         return
 
     # 3) Baholash va hisobot
     result = _evaluate(expected_phrase, stt_text)
+    log.info("DIAG eval: idx=%d pass_ok=%s all_good=%s none_matched=%s counts=%s",
+             idx, result["pass_ok"], result["all_good"], result["none_matched"], result["per_word_counts"])
     await message.answer(_format_step_report(result, expected_phrase), parse_mode=ParseMode.HTML)
 
     # 4) Umumiy statistikani yangilash
@@ -335,6 +394,7 @@ async def handle_step_audio(message: types.Message, state: FSMContext):
             _idx=idx,
             test_current=items[idx][0]
         )
+        log.info("DIAG next: move to idx=%d title='%s'", idx, items[idx][0])
         await _send_step_photo(message, idx, items)
     else:
         final_stats = {
@@ -343,6 +403,7 @@ async def handle_step_audio(message: types.Message, state: FSMContext):
             "failed": failed,
             "failed_words_per_step": failed_words_per_step,
         }
+        log.info("DIAG done: total=%d passed=%d failed=%d", len(items), len(passed), len(failed))
         await message.answer(_format_final_summary(final_stats), parse_mode=ParseMode.HTML)
         await state.clear()
 
@@ -351,7 +412,7 @@ async def handle_step_audio(message: types.Message, state: FSMContext):
 async def only_audio_warning(message: types.Message):
     await message.answer("Iltimos, voice yoki audio yuboring 🎙️")
 
-# ===================== Ixtiyoriy: /reload qo'mondasi =====================
+# ===================== /reload qo'mondasi =====================
 @diagnostika.message(F.text == "/reload")
 async def reload_cfg(message: types.Message, state: FSMContext):
     try:
@@ -362,6 +423,7 @@ async def reload_cfg(message: types.Message, state: FSMContext):
 
     if not items:
         await message.answer("Diagnostika setlari topilmadi.")
+        log.warning("DIAG reload: empty items")
         return
 
     await state.update_data(
@@ -369,5 +431,6 @@ async def reload_cfg(message: types.Message, state: FSMContext):
         _failed_words_per_step={}, test_current=items[0][0]
     )
     await state.set_state(Diagnostika.running)
+    log.info("DIAG reload: total=%d", len(items))
     await message.answer("♻️ Diagnostika konfiguratsiyasi yangilandi. Qayta boshlaymiz.")
     await _send_step_photo(message, 0, items)
