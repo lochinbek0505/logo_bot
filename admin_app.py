@@ -4,7 +4,7 @@ Admin panel (REST) for your aiogram bot modules:
  - hayvon_top (items with images+audios, grouped by category)
  - darslik (code+title+text+pdf)
  - bot users (upsert, block/unblock)
- - notify (broadcast/send text, audio/voice, video, photo to bot users)
+ - notify (broadcast/send text, audio/voice, video, photo, document, mixed)
 
 Tech stack: FastAPI + SQLModel + SQLite.
 Auth: X-API-Key header.
@@ -39,7 +39,7 @@ from sqlmodel import SQLModel, Field, Session, create_engine, select
 # ===================== Config =====================
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "changeme")
 
-# Support both names to avoid breaking anything: prefer TELEGRAM_BOT_TOKEN, fallback botToken
+# Support both names: prefer TELEGRAM_BOT_TOKEN, fallback botToken
 PREF_BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
 ALT_BOT_TOKEN_ENV = "botToken"
 
@@ -140,12 +140,12 @@ def init_db():
 
 
 # ===================== App =====================
-app = FastAPI(title="Bot Admin API", version="1.3.0")
+app = FastAPI(title="Bot Admin API", version="1.4.0")
 
-# CORS (front-end uchun)
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # istasangiz aniq domenlarga toraytirishingiz mumkin
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -158,7 +158,6 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 @app.on_event("startup")
 def on_start():
     init_db()
-    # Seed diagnostika if empty
     with Session(engine) as s:
         count = len(s.exec(select(DiagnostikaItem)).all())
         if count == 0:
@@ -171,7 +170,7 @@ def on_start():
             s.commit()
 
 
-# Swagger'da apiKey ko'rsatish
+# Swagger apiKey
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
@@ -415,7 +414,7 @@ def get_darslik_by_code(code: str):
         return obj
 
 
-# ===================== Users CRUD, Upsert & Block (restored) =====================
+# ===================== Users CRUD, Upsert & Block =====================
 @app.get("/users", response_model=List[BotUser])
 def list_users(
     blocked: Optional[bool] = None,
@@ -583,28 +582,16 @@ def export_darslik(code: str):
 # ===================== Statistics =====================
 @app.get("/stats")
 def stats() -> Dict[str, Any]:
-    """
-    Returns aggregated counts and distributions for dashboard cards:
-      - totals (diagnostika/hayvon/darslik/users)
-      - enabled counts
-      - hayvon by group distribution
-      - users by role, blocked count
-      - lessons enabled/disabled counts
-    """
     with Session(engine) as s:
-        # Diagnostika
         diag_total = s.exec(select(DiagnostikaItem)).all()
         diag_enabled = [d for d in diag_total if d.enabled]
-        # Hayvon
         hay_total = s.exec(select(HayvonItem)).all()
         hay_enabled = [h for h in hay_total if h.enabled]
         by_group: Dict[str, int] = {}
         for g in HayGroup:
             by_group[g.value] = len([x for x in hay_total if x.group == g])
-        # Darslik
         lessons = s.exec(select(Darslik)).all()
         lessons_enabled = [l for l in lessons if l.enabled]
-        # Users
         users = s.exec(select(BotUser)).all()
         users_by_role: Dict[str, int] = {"admin": 0, "teacher": 0, "user": 0}
         blocked_count = 0
@@ -661,6 +648,10 @@ def _abs_url_from_req(req: Request, path_or_url: str) -> str:
     return f"{scheme}://{host}{path_or_url}"
 
 
+def _abs_all(req: Request, items: Optional[List[str]]) -> List[str]:
+    return [_abs_url_from_req(req, x) for x in (items or []) if x]
+
+
 def _select_targets(
     tg_id: Optional[int],
     role: Optional[UserRole],
@@ -689,9 +680,19 @@ def _select_targets(
         return out
 
 
+def _post_telegram(client: httpx.Client, method: str, data: Dict[str, Any]) -> None:
+    try:
+        resp = client.post(method, data=data)
+        # Optional: log bad responses
+        # if resp.status_code != 200:
+        #     print("TG ERR:", method, resp.text)
+    except Exception:
+        pass
+
+
 def _broadcast_sync(
     method: str,
-    media_field: Optional[str],            # "audio" | "voice" | "video" | "photo" | None
+    media_field: Optional[str],            # "audio" | "voice" | "video" | "photo" | "document" | None
     media_url: Optional[str],              # absolute url or None
     text_or_caption: Optional[str],
     parse_mode: Optional[str],
@@ -717,16 +718,40 @@ def _broadcast_sync(
                     data["caption"] = text_or_caption
                 if parse_mode:
                     data["parse_mode"] = parse_mode
-
-            try:
-                resp = client.post(method, data=data)
-                if resp.status_code != 200:
-                    # You can log resp.text here if needed
-                    pass
-            except Exception:
-                pass
-
+            _post_telegram(client, method, data)
             time.sleep(0.05)  # avoid flood
+
+
+def _broadcast_sequence_sync(
+    jobs: List[Dict[str, Any]],   # each: {method, media_field, media_url, text_or_caption, parse_mode, disable_web_page_preview}
+    disable_notification: bool,
+    targets: List[int],
+):
+    token = _ensure_bot_token()
+    base = _tg_api_base(token)
+    with httpx.Client(base_url=base, timeout=httpx.Timeout(30, connect=10)) as client:
+        for chat_id in targets:
+            for j in jobs:
+                data: Dict[str, Any] = {"chat_id": chat_id, "disable_notification": disable_notification}
+                method = j["method"]
+                if method == "sendMessage":
+                    data["text"] = j.get("text_or_caption") or ""
+                    if j.get("parse_mode"):
+                        data["parse_mode"] = j["parse_mode"]
+                    if "disable_web_page_preview" in j and j["disable_web_page_preview"] is not None:
+                        data["disable_web_page_preview"] = j["disable_web_page_preview"]
+                else:
+                    mf = j.get("media_field")
+                    mu = j.get("media_url")
+                    if mf and mu:
+                        data[mf] = mu
+                    if j.get("text_or_caption"):
+                        data["caption"] = j["text_or_caption"]
+                    if j.get("parse_mode"):
+                        data["parse_mode"] = j["parse_mode"]
+                _post_telegram(client, method, data)
+                time.sleep(0.05)
+            time.sleep(0.05)
 
 # ---- TEXT ----
 @app.post("/notify/text", dependencies=[Depends(require_api_key)])
@@ -831,12 +856,12 @@ def notify_video(
     )
     return {"scheduled": len(targets), "method": "sendVideo", "media": absolute, "to_all": to_all}
 
-# ---- PHOTO (NEW) ----
+# ---- PHOTO ----
 @app.post("/notify/photo", dependencies=[Depends(require_api_key)])
 def notify_photo(
     request: Request,
     background: BackgroundTasks,
-    media_url: str = Form(...),                # /static/images/xxx.png (or jpg/webp) yoki http(s) url
+    media_url: str = Form(...),                # /static/images/xxx.png|jpg|webp yoki http(s) url
     caption: Optional[str] = Form(None),
     tg_id: Optional[int] = Form(None),
     role: Optional[UserRole] = Form(None),
@@ -845,10 +870,6 @@ def notify_photo(
     disable_notification: bool = Form(False),
     to_all: bool = Form(False),
 ):
-    """
-    Broadcast a photo with optional caption.
-    Use /upload/image first to get /static/images/... then pass as media_url here.
-    """
     _ensure_bot_token()
     absolute = _abs_url_from_req(request, media_url)
     targets = _select_targets(
@@ -868,3 +889,119 @@ def notify_photo(
         targets,
     )
     return {"scheduled": len(targets), "method": "sendPhoto", "media": absolute, "to_all": to_all}
+
+# ---- DOCUMENT (any other file) ----
+@app.post("/notify/document", dependencies=[Depends(require_api_key)])
+def notify_document(
+    request: Request,
+    background: BackgroundTasks,
+    media_url: str = Form(...),                # /static/pdfs/xxx.pdf yoki har qanday http(s) url
+    caption: Optional[str] = Form(None),
+    tg_id: Optional[int] = Form(None),
+    role: Optional[UserRole] = Form(None),
+    include_blocked: bool = Form(False),
+    parse_mode: Optional[str] = Form("HTML"),
+    disable_notification: bool = Form(False),
+    to_all: bool = Form(False),
+):
+    _ensure_bot_token()
+    absolute = _abs_url_from_req(request, media_url)
+    targets = _select_targets(
+        tg_id=tg_id, role=role, include_blocked=include_blocked, to_all=to_all
+    )
+    if not targets:
+        return {"scheduled": 0, "method": "sendDocument", "media": absolute, "to_all": to_all}
+    background.add_task(
+        _broadcast_sync,
+        "sendDocument",
+        "document",
+        absolute,
+        caption,
+        parse_mode,
+        None,
+        disable_notification,
+        targets,
+    )
+    return {"scheduled": len(targets), "method": "sendDocument", "media": absolute, "to_all": to_all}
+
+# ---- MIXED (NEW): text + many photos/videos/audios/voices/documents in one go ----
+@app.post("/notify/mixed", dependencies=[Depends(require_api_key)])
+def notify_mixed(
+    request: Request,
+    background: BackgroundTasks,
+    # Text
+    text: Optional[str] = Form(None),
+    parse_mode: Optional[str] = Form("HTML"),
+    disable_web_page_preview: bool = Form(False),
+
+    # Media lists — you can repeat same form field multiple times
+    photos: Optional[List[str]] = Form(None),     # field name: photos
+    videos: Optional[List[str]] = Form(None),     # field name: videos
+    audios: Optional[List[str]] = Form(None),     # field name: audios
+    voices: Optional[List[str]] = Form(None),     # field name: voices
+    documents: Optional[List[str]] = Form(None),  # field name: documents
+
+    # Captions (applies to each media item, optional)
+    caption: Optional[str] = Form(None),
+
+    # Targeting
+    tg_id: Optional[int] = Form(None),
+    role: Optional[UserRole] = Form(None),
+    include_blocked: bool = Form(False),
+    to_all: bool = Form(False),
+
+    # Delivery
+    disable_notification: bool = Form(False),
+):
+    """
+    Aralash yuborish:
+      - text (ixtiyoriy)
+      - bir nechta rasm/video/audio/voice/document URL'lari (relative yoki absolute)
+    Ketma-ketlik: text -> photos -> videos -> audios -> voices -> documents
+    """
+    _ensure_bot_token()
+    targets = _select_targets(tg_id=tg_id, role=role, include_blocked=include_blocked, to_all=to_all)
+    if not targets:
+        return {"scheduled": 0, "jobs": 0, "to_all": to_all}
+
+    jobs: List[Dict[str, Any]] = []
+    # text
+    if text:
+        jobs.append({
+            "method": "sendMessage",
+            "media_field": None,
+            "media_url": None,
+            "text_or_caption": text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": disable_web_page_preview,
+        })
+
+    # helpers to add media jobs
+    def add_media_jobs(lst: List[str], method: str, field: str):
+        for u in lst:
+            jobs.append({
+                "method": method,
+                "media_field": field,
+                "media_url": _abs_url_from_req(request, u),
+                "text_or_caption": caption,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": None,
+            })
+
+    # convert & append
+    if photos:
+        add_media_jobs(_abs_all(request, photos), "sendPhoto", "photo")
+    if videos:
+        add_media_jobs(_abs_all(request, videos), "sendVideo", "video")
+    if audios:
+        add_media_jobs(_abs_all(request, audios), "sendAudio", "audio")
+    if voices:
+        add_media_jobs(_abs_all(request, voices), "sendVoice", "voice")
+    if documents:
+        add_media_jobs(_abs_all(request, documents), "sendDocument", "document")
+
+    if not jobs:
+        raise HTTPException(400, detail="Nothing to send: provide text and/or at least one media url.")
+
+    background.add_task(_broadcast_sequence_sync, jobs, disable_notification, targets)
+    return {"scheduled": len(targets), "jobs": len(jobs), "to_all": to_all}
