@@ -17,7 +17,7 @@ from .inllines import hayvonlar_ichidan_top_inline  # sizdagi inline tugmalar yo
 # ===================== Config =====================
 # Admin API: /export/hayvon quyidagilarni qaytaradi:
 # [{"key","title","group","image_url","audio_url"}, ...]
-ADMIN_BASE = os.getenv("ADMIN_BASE", "http://185.217.131.39/")
+ADMIN_BASE = os.getenv("ADMIN_BASE", "http://185.217.131.39")
 
 # Admin'ning group enumlari: animal, action, transport, nature, misc
 MIN_CHOICES = 3  # bitta raundda nechta surat ko'rsatiladi
