@@ -4,7 +4,7 @@ Admin panel (REST) for your aiogram bot modules:
  - hayvon_top (items with images+audios, grouped by category)
  - darslik (code+title+text+pdf)
  - bot users (upsert, block/unblock)
- - notify (broadcast/send text, audio/voice, video to bot users)
+ - notify (broadcast/send text, audio/voice, video, photo to bot users)
 
 Tech stack: FastAPI + SQLModel + SQLite.
 Auth: X-API-Key header.
@@ -38,7 +38,10 @@ from sqlmodel import SQLModel, Field, Session, create_engine, select
 
 # ===================== Config =====================
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "changeme")
-BOT_TOKEN_ENV = "botToken"
+
+# Support both names to avoid breaking anything: prefer TELEGRAM_BOT_TOKEN, fallback botToken
+PREF_BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
+ALT_BOT_TOKEN_ENV = "botToken"
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "data" / "app.db"
@@ -137,12 +140,12 @@ def init_db():
 
 
 # ===================== App =====================
-app = FastAPI(title="Bot Admin API", version="1.2.0")
+app = FastAPI(title="Bot Admin API", version="1.3.0")
 
 # CORS (front-end uchun)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # yoki ["http://localhost:xxxxx", ...] aniq domenlar
+    allow_origins=["*"],  # istasangiz aniq domenlarga toraytirishingiz mumkin
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -412,6 +415,123 @@ def get_darslik_by_code(code: str):
         return obj
 
 
+# ===================== Users CRUD, Upsert & Block (restored) =====================
+@app.get("/users", response_model=List[BotUser])
+def list_users(
+    blocked: Optional[bool] = None,
+    username: Optional[str] = None,
+    role: Optional[UserRole] = None,
+):
+    with Session(engine) as s:
+        q = select(BotUser).order_by(BotUser.created_at.desc())
+        if blocked is not None:
+            q = q.where(BotUser.is_blocked == blocked)
+        if username:
+            q = q.where(BotUser.username.contains(username))
+        if role is not None:
+            q = q.where(BotUser.role == role)
+        return s.exec(q).all()
+
+
+@app.post("/users", response_model=BotUser, dependencies=[Depends(require_api_key)])
+def create_user(item: BotUser):
+    with Session(engine) as s:
+        exists = s.exec(select(BotUser).where(BotUser.tg_id == item.tg_id)).first()
+        if exists:
+            raise HTTPException(409, detail="tg_id already exists")
+        s.add(item)
+        s.commit()
+        s.refresh(item)
+        return item
+
+
+@app.put("/users/{user_id}", response_model=BotUser, dependencies=[Depends(require_api_key)])
+def update_user(user_id: int, data: BotUser):
+    with Session(engine) as s:
+        obj = s.get(BotUser, user_id)
+        if not obj:
+            raise HTTPException(404)
+        if data.tg_id != obj.tg_id:
+            dupe = s.exec(select(BotUser).where(BotUser.tg_id == data.tg_id)).first()
+            if dupe:
+                raise HTTPException(409, detail="tg_id already exists")
+        for f in ["tg_id", "username", "full_name", "role", "is_blocked", "notes"]:
+            setattr(obj, f, getattr(data, f))
+        s.add(obj)
+        s.commit()
+        s.refresh(obj)
+        return obj
+
+
+@app.delete("/users/{user_id}", dependencies=[Depends(require_api_key)])
+def delete_user(user_id: int):
+    with Session(engine) as s:
+        obj = s.get(BotUser, user_id)
+        if not obj:
+            raise HTTPException(404)
+        s.delete(obj)
+        s.commit()
+        return {"ok": True}
+
+
+@app.post("/users/upsert", response_model=BotUser, dependencies=[Depends(require_api_key)])
+def upsert_user(
+    tg_id: int = Form(...),
+    username: Optional[str] = Form(None),
+    full_name: Optional[str] = Form(None),
+    role: UserRole = Form(UserRole.user),
+    notes: Optional[str] = Form(None),
+):
+    with Session(engine) as s:
+        obj = s.exec(select(BotUser).where(BotUser.tg_id == tg_id)).first()
+        if obj:
+            obj.username = username or obj.username
+            obj.full_name = full_name or obj.full_name
+            obj.role = role or obj.role
+            obj.notes = notes or obj.notes
+            s.add(obj)
+            s.commit()
+            s.refresh(obj)
+            return obj
+        new_u = BotUser(
+            tg_id=tg_id,
+            username=username or "",
+            full_name=full_name or "",
+            role=role,
+            notes=notes or "",
+        )
+        s.add(new_u)
+        s.commit()
+        s.refresh(new_u)
+        return new_u
+
+
+@app.post("/users/{user_id}/block", response_model=BotUser, dependencies=[Depends(require_api_key)])
+def block_user(user_id: int):
+    with Session(engine) as s:
+        obj = s.get(BotUser, user_id)
+        if not obj:
+            raise HTTPException(404)
+        obj.is_blocked = True
+        s.add(obj)
+        s.commit()
+        s.refresh(obj)
+        return obj
+
+
+@app.post("/users/{user_id}/unblock", response_model=BotUser, dependencies=[Depends(require_api_key)])
+def unblock_user(user_id: int):
+    with Session(engine) as s:
+        obj = s.get(BotUser, user_id)
+        if not obj:
+            raise HTTPException(404)
+        obj.is_blocked = False
+        s.add(obj)
+        s.commit()
+        s.refresh(obj)
+        return obj
+
+
 # ===================== Exports for bot =====================
 @app.get("/export/diagnostika")
 def export_diag(enabled_only: bool = True):
@@ -516,9 +636,14 @@ def root():
 
 # ===================== NOTIFY (send to bot users) =====================
 def _ensure_bot_token() -> str:
-    token = os.getenv(BOT_TOKEN_ENV, "").strip()
+    token = os.getenv(PREF_BOT_TOKEN_ENV, "").strip()
     if not token:
-        raise HTTPException(500, detail=f"{BOT_TOKEN_ENV} is not set on server")
+        token = os.getenv(ALT_BOT_TOKEN_ENV, "").strip()
+    if not token:
+        raise HTTPException(
+            500,
+            detail=f"{PREF_BOT_TOKEN_ENV} is not set (also checked {ALT_BOT_TOKEN_ENV})"
+        )
     return token
 
 
@@ -531,7 +656,6 @@ def _abs_url_from_req(req: Request, path_or_url: str) -> str:
         return path_or_url
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
         return path_or_url
-    # Relative -> absolute (respect Host header)
     scheme = req.headers.get("X-Forwarded-Proto") or req.url.scheme
     host = req.headers.get("X-Forwarded-Host") or req.headers.get("Host") or req.url.netloc
     return f"{scheme}://{host}{path_or_url}"
@@ -567,7 +691,7 @@ def _select_targets(
 
 def _broadcast_sync(
     method: str,
-    media_field: Optional[str],            # "audio" | "voice" | "video" | None
+    media_field: Optional[str],            # "audio" | "voice" | "video" | "photo" | None
     media_url: Optional[str],              # absolute url or None
     text_or_caption: Optional[str],
     parse_mode: Optional[str],
@@ -577,7 +701,6 @@ def _broadcast_sync(
 ):
     token = _ensure_bot_token()
     base = _tg_api_base(token)
-    # one shared client
     with httpx.Client(base_url=base, timeout=httpx.Timeout(30, connect=10)) as client:
         for chat_id in targets:
             data: Dict[str, Any] = {"chat_id": chat_id, "disable_notification": disable_notification}
@@ -588,7 +711,6 @@ def _broadcast_sync(
                 if disable_web_page_preview is not None:
                     data["disable_web_page_preview"] = disable_web_page_preview
             else:
-                # media methods
                 if media_field and media_url:
                     data[media_field] = media_url
                 if text_or_caption:
@@ -598,17 +720,15 @@ def _broadcast_sync(
 
             try:
                 resp = client.post(method, data=data)
-                # Optional: log bad responses
                 if resp.status_code != 200:
-                    # Avoid crashing broadcast loop
+                    # You can log resp.text here if needed
                     pass
             except Exception:
                 pass
 
-            # tiny sleep to avoid flood
-            time.sleep(0.05)
+            time.sleep(0.05)  # avoid flood
 
-
+# ---- TEXT ----
 @app.post("/notify/text", dependencies=[Depends(require_api_key)])
 def notify_text(
     request: Request,
@@ -640,7 +760,7 @@ def notify_text(
     )
     return {"scheduled": len(targets), "method": "sendMessage", "to_all": to_all}
 
-
+# ---- AUDIO/VOICE ----
 @app.post("/notify/audio", dependencies=[Depends(require_api_key)])
 def notify_audio(
     request: Request,
@@ -677,7 +797,7 @@ def notify_audio(
     )
     return {"scheduled": len(targets), "method": method, "media": absolute, "to_all": to_all}
 
-
+# ---- VIDEO ----
 @app.post("/notify/video", dependencies=[Depends(require_api_key)])
 def notify_video(
     request: Request,
@@ -710,3 +830,41 @@ def notify_video(
         targets,
     )
     return {"scheduled": len(targets), "method": "sendVideo", "media": absolute, "to_all": to_all}
+
+# ---- PHOTO (NEW) ----
+@app.post("/notify/photo", dependencies=[Depends(require_api_key)])
+def notify_photo(
+    request: Request,
+    background: BackgroundTasks,
+    media_url: str = Form(...),                # /static/images/xxx.png (or jpg/webp) yoki http(s) url
+    caption: Optional[str] = Form(None),
+    tg_id: Optional[int] = Form(None),
+    role: Optional[UserRole] = Form(None),
+    include_blocked: bool = Form(False),
+    parse_mode: Optional[str] = Form("HTML"),
+    disable_notification: bool = Form(False),
+    to_all: bool = Form(False),
+):
+    """
+    Broadcast a photo with optional caption.
+    Use /upload/image first to get /static/images/... then pass as media_url here.
+    """
+    _ensure_bot_token()
+    absolute = _abs_url_from_req(request, media_url)
+    targets = _select_targets(
+        tg_id=tg_id, role=role, include_blocked=include_blocked, to_all=to_all
+    )
+    if not targets:
+        return {"scheduled": 0, "method": "sendPhoto", "media": absolute, "to_all": to_all}
+    background.add_task(
+        _broadcast_sync,
+        "sendPhoto",
+        "photo",
+        absolute,
+        caption,
+        parse_mode,
+        None,
+        disable_notification,
+        targets,
+    )
+    return {"scheduled": len(targets), "method": "sendPhoto", "media": absolute, "to_all": to_all}
