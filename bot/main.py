@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 from typing import Callable, Dict, Any, Awaitable, List
+from user_service import upsert_user
 
 from aiogram import Bot, Dispatcher, Router, F, BaseMiddleware
 from aiogram.types import (
@@ -156,12 +157,13 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 # ===================== Handlers =====================
+
 @dp.message(CommandStart())
 async def start(message: Message):
+    await upsert_user(message.from_user)  # 🔹 user’ni ro‘yxatga olish
     username = message.from_user.username or message.from_user.full_name
-    log.info("Received /start from user=%s chat=%s", message.from_user.id, message.chat.id)
     await message.reply(f"Salom, {username}!", reply_markup=DEFAULT_MARKUP)
-
+    
 # ===================== Main =====================
 async def main():
     # Bot ma'lumotini loglaymiz
