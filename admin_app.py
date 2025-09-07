@@ -38,7 +38,7 @@ from sqlmodel import SQLModel, Field, Session, create_engine, select
 
 # ===================== Config =====================
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "changeme")
-BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
+BOT_TOKEN_ENV = "botToken"
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "data" / "app.db"
