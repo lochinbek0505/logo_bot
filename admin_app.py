@@ -4,25 +4,32 @@ Admin panel (REST) for your aiogram bot modules:
  - hayvon_top (items with images+audios, grouped by category)
  - darslik (code+title+text+pdf)
  - bot users (upsert, block/unblock)
+ - notify (broadcast/send text, audio/voice, video to bot users)
 
 Tech stack: FastAPI + SQLModel + SQLite.
 Auth: X-API-Key header.
-Static uploads: ./static/images, ./static/audios, ./static/pdfs
+Static uploads: ./static/images, ./static/audios, ./static/pdfs, ./static/videos
 Swagger UI: /docs (Authorize -> apiKey scheme).
 
 Run:
-  pip install fastapi uvicorn sqlmodel python-multipart
-  export ADMIN_API_KEY="changeme"   # or your own
+  pip install fastapi uvicorn sqlmodel python-multipart httpx
+  export ADMIN_API_KEY="changeme"            # or your own
+  export TELEGRAM_BOT_TOKEN="12345:ABCDE"    # required for /notify/* endpoints
   uvicorn admin_app:app --reload --port 8099
 """
 
 import os
+import time
 from typing import List, Optional, Dict, Any
 from enum import Enum
 from pathlib import Path
 from datetime import datetime
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
+import httpx
+from fastapi import (
+    FastAPI, Depends, HTTPException, UploadFile, File, Form,
+    BackgroundTasks, Request
+)
 from fastapi.security.api_key import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -31,12 +38,15 @@ from sqlmodel import SQLModel, Field, Session, create_engine, select
 
 # ===================== Config =====================
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "changeme")
+BOT_TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
+
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "data" / "app.db"
 
 IMG_DIR = BASE_DIR / "static" / "images"
 AUD_DIR = BASE_DIR / "static" / "audios"
 PDF_DIR = BASE_DIR / "static" / "pdfs"
+VID_DIR = BASE_DIR / "static" / "videos"
 
 # --- SEED DIAGNOSTIKA (10 ta) ---
 SEED_DIAG = [
@@ -52,15 +62,16 @@ SEED_DIAG = [
     ("Qovun Baqlajon Tovuq", "/static/images/qovun.png", 10),
 ]
 
-
-for p in (IMG_DIR, AUD_DIR, PDF_DIR, DB_PATH.parent):
+for p in (IMG_DIR, AUD_DIR, PDF_DIR, VID_DIR, DB_PATH.parent):
     p.mkdir(parents=True, exist_ok=True)
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
+
 def require_api_key(api_key: Optional[str] = Depends(api_key_header)):
     if api_key != ADMIN_API_KEY:
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
 
 # ===================== Models =====================
 class HayGroup(str, Enum):
@@ -70,12 +81,14 @@ class HayGroup(str, Enum):
     nature = "nature"
     misc = "misc"
 
+
 class DiagnostikaItem(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     phrase: str
     image_path: str
     enabled: bool = True
     sort_order: int = 0
+
 
 class HayvonItem(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -87,6 +100,7 @@ class HayvonItem(SQLModel, table=True):
     enabled: bool = True
     sort_order: int = 0
 
+
 class Darslik(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     code: str = Field(index=True)   # unique-like (validated)
@@ -96,10 +110,12 @@ class Darslik(SQLModel, table=True):
     enabled: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
+
 class UserRole(str, Enum):
     admin = "admin"
     teacher = "teacher"
     user = "user"
+
 
 class BotUser(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -111,30 +127,35 @@ class BotUser(SQLModel, table=True):
     notes: Optional[str] = ""
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
+
 # ===================== DB =====================
 engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
+
 
 def init_db():
     SQLModel.metadata.create_all(engine)
 
+
 # ===================== App =====================
-app = FastAPI(title="Bot Admin API", version="1.1.0")
+app = FastAPI(title="Bot Admin API", version="1.2.0")
 
 # CORS (front-end uchun)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"]
+    allow_origins=["*"],  # yoki ["http://localhost:xxxxx", ...] aniq domenlar
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Static
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
+
 @app.on_event("startup")
 def on_start():
     init_db()
     # Seed diagnostika if empty
-    from sqlmodel import select
     with Session(engine) as s:
         count = len(s.exec(select(DiagnostikaItem)).all())
         if count == 0:
@@ -166,6 +187,7 @@ def custom_openapi():
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
+
 app.openapi = custom_openapi
 
 # ===================== Uploads =====================
@@ -182,6 +204,7 @@ def upload_image(file: UploadFile = File(...)):
         f.write(file.file.read())
     return {"url": f"/static/images/{dest.name}", "path": str(dest)}
 
+
 @app.post("/upload/audio", dependencies=[Depends(require_api_key)])
 def upload_audio(file: UploadFile = File(...)):
     fname = file.filename or "audio.bin"
@@ -194,6 +217,7 @@ def upload_audio(file: UploadFile = File(...)):
     with dest.open("wb") as f:
         f.write(file.file.read())
     return {"url": f"/static/audios/{dest.name}", "path": str(dest)}
+
 
 @app.post("/upload/pdf", dependencies=[Depends(require_api_key)])
 def upload_pdf(file: UploadFile = File(...)):
@@ -208,6 +232,21 @@ def upload_pdf(file: UploadFile = File(...)):
         f.write(file.file.read())
     return {"url": f"/static/pdfs/{dest.name}", "path": str(dest)}
 
+
+@app.post("/upload/video", dependencies=[Depends(require_api_key)])
+def upload_video(file: UploadFile = File(...)):
+    fname = file.filename or "video.bin"
+    dest = VID_DIR / fname
+    i = 1
+    while dest.exists():
+        stem, suf = Path(fname).stem, Path(fname).suffix
+        dest = VID_DIR / f"{stem}_{i}{suf}"
+        i += 1
+    with dest.open("wb") as f:
+        f.write(file.file.read())
+    return {"url": f"/static/videos/{dest.name}", "path": str(dest)}
+
+
 # ===================== Diagnostika CRUD =====================
 @app.get("/diagnostika", response_model=List[DiagnostikaItem])
 def list_diag(enabled: Optional[bool] = None):
@@ -217,6 +256,7 @@ def list_diag(enabled: Optional[bool] = None):
             query = query.where(DiagnostikaItem.enabled == enabled)
         return s.exec(query).all()
 
+
 @app.post("/diagnostika", response_model=DiagnostikaItem, dependencies=[Depends(require_api_key)])
 def create_diag(item: DiagnostikaItem):
     with Session(engine) as s:
@@ -224,6 +264,7 @@ def create_diag(item: DiagnostikaItem):
         s.commit()
         s.refresh(item)
         return item
+
 
 @app.put("/diagnostika/{item_id}", response_model=DiagnostikaItem, dependencies=[Depends(require_api_key)])
 def update_diag(item_id: int, data: DiagnostikaItem):
@@ -238,6 +279,7 @@ def update_diag(item_id: int, data: DiagnostikaItem):
         s.refresh(obj)
         return obj
 
+
 @app.delete("/diagnostika/{item_id}", dependencies=[Depends(require_api_key)])
 def delete_diag(item_id: int):
     with Session(engine) as s:
@@ -247,6 +289,7 @@ def delete_diag(item_id: int):
         s.delete(obj)
         s.commit()
         return {"ok": True}
+
 
 # ===================== Hayvon_top CRUD =====================
 @app.get("/hayvon", response_model=List[HayvonItem])
@@ -259,6 +302,7 @@ def list_hayvon(enabled: Optional[bool] = None, group: Optional[HayGroup] = None
             query = query.where(HayvonItem.group == group)
         return s.exec(query).all()
 
+
 @app.post("/hayvon", response_model=HayvonItem, dependencies=[Depends(require_api_key)])
 def create_hayvon(item: HayvonItem):
     with Session(engine) as s:
@@ -269,6 +313,7 @@ def create_hayvon(item: HayvonItem):
         s.commit()
         s.refresh(item)
         return item
+
 
 @app.put("/hayvon/{item_id}", response_model=HayvonItem, dependencies=[Depends(require_api_key)])
 def update_hayvon(item_id: int, data: HayvonItem):
@@ -287,6 +332,7 @@ def update_hayvon(item_id: int, data: HayvonItem):
         s.refresh(obj)
         return obj
 
+
 @app.delete("/hayvon/{item_id}", dependencies=[Depends(require_api_key)])
 def delete_hayvon(item_id: int):
     with Session(engine) as s:
@@ -296,6 +342,7 @@ def delete_hayvon(item_id: int):
         s.delete(obj)
         s.commit()
         return {"ok": True}
+
 
 # ===================== Darslik CRUD & Export =====================
 @app.get("/darslik", response_model=List[Darslik])
@@ -314,6 +361,7 @@ def list_darslik(
             q = q.where(Darslik.title.contains(title))
         return s.exec(q).all()
 
+
 @app.post("/darslik", response_model=Darslik, dependencies=[Depends(require_api_key)])
 def create_darslik(item: Darslik):
     with Session(engine) as s:
@@ -324,6 +372,7 @@ def create_darslik(item: Darslik):
         s.commit()
         s.refresh(item)
         return item
+
 
 @app.put("/darslik/{item_id}", response_model=Darslik, dependencies=[Depends(require_api_key)])
 def update_darslik(item_id: int, data: Darslik):
@@ -342,6 +391,7 @@ def update_darslik(item_id: int, data: Darslik):
         s.refresh(obj)
         return obj
 
+
 @app.delete("/darslik/{item_id}", dependencies=[Depends(require_api_key)])
 def delete_darslik(item_id: int):
     with Session(engine) as s:
@@ -352,6 +402,7 @@ def delete_darslik(item_id: int):
         s.commit()
         return {"ok": True}
 
+
 @app.get("/darslik/by-code/{code}", response_model=Darslik)
 def get_darslik_by_code(code: str):
     with Session(engine) as s:
@@ -360,130 +411,6 @@ def get_darslik_by_code(code: str):
             raise HTTPException(404, detail="not found")
         return obj
 
-@app.get("/export/darslik/{code}")
-def export_darslik(code: str):
-    """Bot uchun: darslikni kodi orqali minimal JSON (faqat enabled)"""
-    with Session(engine) as s:
-        obj = s.exec(select(Darslik).where(Darslik.code == code, Darslik.enabled == True)).first()
-        if not obj:
-            raise HTTPException(404, detail="not found or disabled")
-        pdf_url = obj.pdf_path if obj.pdf_path.startswith("/static/") else f"/static/pdfs/{Path(obj.pdf_path).name}"
-        return {
-            "code": obj.code,
-            "title": obj.title,
-            "text": obj.text,
-            "pdf_url": pdf_url,
-        }
-
-# ===================== Users CRUD, Upsert & Block =====================
-@app.get("/users", response_model=List[BotUser])
-def list_users(
-    blocked: Optional[bool] = None,
-    username: Optional[str] = None,
-    role: Optional[UserRole] = None,
-):
-    with Session(engine) as s:
-        q = select(BotUser).order_by(BotUser.created_at.desc())
-        if blocked is not None:
-            q = q.where(BotUser.is_blocked == blocked)
-        if username:
-            q = q.where(BotUser.username.contains(username))
-        if role is not None:
-            q = q.where(BotUser.role == role)
-        return s.exec(q).all()
-
-@app.post("/users", response_model=BotUser, dependencies=[Depends(require_api_key)])
-def create_user(item: BotUser):
-    with Session(engine) as s:
-        exists = s.exec(select(BotUser).where(BotUser.tg_id == item.tg_id)).first()
-        if exists:
-            raise HTTPException(409, detail="tg_id already exists")
-        s.add(item)
-        s.commit()
-        s.refresh(item)
-        return item
-
-@app.put("/users/{user_id}", response_model=BotUser, dependencies=[Depends(require_api_key)])
-def update_user(user_id: int, data: BotUser):
-    with Session(engine) as s:
-        obj = s.get(BotUser, user_id)
-        if not obj:
-            raise HTTPException(404)
-        if data.tg_id != obj.tg_id:
-            dupe = s.exec(select(BotUser).where(BotUser.tg_id == data.tg_id)).first()
-            if dupe:
-                raise HTTPException(409, detail="tg_id already exists")
-        for f in ["tg_id", "username", "full_name", "role", "is_blocked", "notes"]:
-            setattr(obj, f, getattr(data, f))
-        s.add(obj)
-        s.commit()
-        s.refresh(obj)
-        return obj
-
-@app.delete("/users/{user_id}", dependencies=[Depends(require_api_key)])
-def delete_user(user_id: int):
-    with Session(engine) as s:
-        obj = s.get(BotUser, user_id)
-        if not obj:
-            raise HTTPException(404)
-        s.delete(obj)
-        s.commit()
-        return {"ok": True}
-
-@app.post("/users/upsert", response_model=BotUser, dependencies=[Depends(require_api_key)])
-def upsert_user(
-    tg_id: int = Form(...),
-    username: Optional[str] = Form(None),
-    full_name: Optional[str] = Form(None),
-    role: UserRole = Form(UserRole.user),
-    notes: Optional[str] = Form(None),
-):
-    with Session(engine) as s:
-        obj = s.exec(select(BotUser).where(BotUser.tg_id == tg_id)).first()
-        if obj:
-            obj.username = username or obj.username
-            obj.full_name = full_name or obj.full_name
-            obj.role = role or obj.role
-            obj.notes = notes or obj.notes
-            s.add(obj)
-            s.commit()
-            s.refresh(obj)
-            return obj
-        new_u = BotUser(
-            tg_id=tg_id,
-            username=username or "",
-            full_name=full_name or "",
-            role=role,
-            notes=notes or "",
-        )
-        s.add(new_u)
-        s.commit()
-        s.refresh(new_u)
-        return new_u
-
-@app.post("/users/{user_id}/block", response_model=BotUser, dependencies=[Depends(require_api_key)])
-def block_user(user_id: int):
-    with Session(engine) as s:
-        obj = s.get(BotUser, user_id)
-        if not obj:
-            raise HTTPException(404)
-        obj.is_blocked = True
-        s.add(obj)
-        s.commit()
-        s.refresh(obj)
-        return obj
-
-@app.post("/users/{user_id}/unblock", response_model=BotUser, dependencies=[Depends(require_api_key)])
-def unblock_user(user_id: int):
-    with Session(engine) as s:
-        obj = s.get(BotUser, user_id)
-        if not obj:
-            raise HTTPException(404)
-        obj.is_blocked = False
-        s.add(obj)
-        s.commit()
-        s.refresh(obj)
-        return obj
 
 # ===================== Exports for bot =====================
 @app.get("/export/diagnostika")
@@ -500,6 +427,7 @@ def export_diag(enabled_only: bool = True):
         }
         for i in items
     ]
+
 
 @app.get("/export/hayvon")
 def export_hayvon(enabled_only: bool = True, group: Optional[HayGroup] = None):
@@ -521,6 +449,7 @@ def export_hayvon(enabled_only: bool = True, group: Optional[HayGroup] = None):
         for i in items
     ]
 
+
 @app.get("/export/darslik/{code}")
 def export_darslik(code: str):
     with Session(engine) as s:
@@ -529,6 +458,7 @@ def export_darslik(code: str):
             raise HTTPException(404, detail="not found or disabled")
         pdf_url = obj.pdf_path if obj.pdf_path.startswith("/static/") else f"/static/pdfs/{Path(obj.pdf_path).name}"
         return {"code": obj.code, "title": obj.title, "text": obj.text, "pdf_url": pdf_url}
+
 
 # ===================== Statistics =====================
 @app.get("/stats")
@@ -578,6 +508,205 @@ def stats() -> Dict[str, Any]:
             "users_by_role": users_by_role,
         }
 
+
 @app.get("/")
 def root():
     return {"name": "Bot Admin API", "ok": True}
+
+
+# ===================== NOTIFY (send to bot users) =====================
+def _ensure_bot_token() -> str:
+    token = os.getenv(BOT_TOKEN_ENV, "").strip()
+    if not token:
+        raise HTTPException(500, detail=f"{BOT_TOKEN_ENV} is not set on server")
+    return token
+
+
+def _tg_api_base(token: str) -> str:
+    return f"https://api.telegram.org/bot{token}/"
+
+
+def _abs_url_from_req(req: Request, path_or_url: str) -> str:
+    if not path_or_url:
+        return path_or_url
+    if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
+        return path_or_url
+    # Relative -> absolute (respect Host header)
+    scheme = req.headers.get("X-Forwarded-Proto") or req.url.scheme
+    host = req.headers.get("X-Forwarded-Host") or req.headers.get("Host") or req.url.netloc
+    return f"{scheme}://{host}{path_or_url}"
+
+
+def _select_targets(
+    tg_id: Optional[int],
+    role: Optional[UserRole],
+    include_blocked: bool,
+    to_all: bool = False,
+) -> List[int]:
+    with Session(engine) as s:
+        if not to_all and tg_id:
+            u = s.exec(select(BotUser).where(BotUser.tg_id == tg_id)).first()
+            if not u:
+                raise HTTPException(404, detail="tg_id not found in users table")
+            if u.is_blocked and not include_blocked:
+                return []
+            return [u.tg_id]
+
+        q = select(BotUser)
+        if not to_all and role:
+            q = q.where(BotUser.role == role)
+
+        users = s.exec(q).all()
+        out = []
+        for u in users:
+            if not include_blocked and u.is_blocked:
+                continue
+            out.append(u.tg_id)
+        return out
+
+
+def _broadcast_sync(
+    method: str,
+    media_field: Optional[str],            # "audio" | "voice" | "video" | None
+    media_url: Optional[str],              # absolute url or None
+    text_or_caption: Optional[str],
+    parse_mode: Optional[str],
+    disable_web_page_preview: Optional[bool],
+    disable_notification: bool,
+    targets: List[int],
+):
+    token = _ensure_bot_token()
+    base = _tg_api_base(token)
+    # one shared client
+    with httpx.Client(base_url=base, timeout=httpx.Timeout(30, connect=10)) as client:
+        for chat_id in targets:
+            data: Dict[str, Any] = {"chat_id": chat_id, "disable_notification": disable_notification}
+            if method == "sendMessage":
+                data["text"] = text_or_caption or ""
+                if parse_mode:
+                    data["parse_mode"] = parse_mode
+                if disable_web_page_preview is not None:
+                    data["disable_web_page_preview"] = disable_web_page_preview
+            else:
+                # media methods
+                if media_field and media_url:
+                    data[media_field] = media_url
+                if text_or_caption:
+                    data["caption"] = text_or_caption
+                if parse_mode:
+                    data["parse_mode"] = parse_mode
+
+            try:
+                resp = client.post(method, data=data)
+                # Optional: log bad responses
+                if resp.status_code != 200:
+                    # Avoid crashing broadcast loop
+                    pass
+            except Exception:
+                pass
+
+            # tiny sleep to avoid flood
+            time.sleep(0.05)
+
+
+@app.post("/notify/text", dependencies=[Depends(require_api_key)])
+def notify_text(
+    request: Request,
+    background: BackgroundTasks,
+    text: str = Form(...),
+    tg_id: Optional[int] = Form(None),
+    role: Optional[UserRole] = Form(None),
+    include_blocked: bool = Form(False),
+    parse_mode: Optional[str] = Form("HTML"),
+    disable_web_page_preview: bool = Form(False),
+    disable_notification: bool = Form(False),
+    to_all: bool = Form(False),
+):
+    _ensure_bot_token()
+    targets = _select_targets(
+        tg_id=tg_id, role=role, include_blocked=include_blocked, to_all=to_all
+    )
+    if not targets:
+        return {"scheduled": 0, "method": "sendMessage", "to_all": to_all}
+    background.add_task(
+        _broadcast_sync,
+        "sendMessage",
+        None, None,
+        text,
+        parse_mode,
+        disable_web_page_preview,
+        disable_notification,
+        targets,
+    )
+    return {"scheduled": len(targets), "method": "sendMessage", "to_all": to_all}
+
+
+@app.post("/notify/audio", dependencies=[Depends(require_api_key)])
+def notify_audio(
+    request: Request,
+    background: BackgroundTasks,
+    media_url: str = Form(...),                 # /static/audios/xxx.mp3 yoki http(s) url
+    caption: Optional[str] = Form(None),
+    as_voice: bool = Form(False),               # True -> sendVoice, False -> sendAudio
+    tg_id: Optional[int] = Form(None),
+    role: Optional[UserRole] = Form(None),
+    include_blocked: bool = Form(False),
+    parse_mode: Optional[str] = Form("HTML"),
+    disable_notification: bool = Form(False),
+    to_all: bool = Form(False),
+):
+    _ensure_bot_token()
+    absolute = _abs_url_from_req(request, media_url)
+    method = "sendVoice" if as_voice else "sendAudio"
+    field_name = "voice" if as_voice else "audio"
+    targets = _select_targets(
+        tg_id=tg_id, role=role, include_blocked=include_blocked, to_all=to_all
+    )
+    if not targets:
+        return {"scheduled": 0, "method": method, "media": absolute, "to_all": to_all}
+    background.add_task(
+        _broadcast_sync,
+        method,
+        field_name,
+        absolute,
+        caption,
+        parse_mode,
+        None,
+        disable_notification,
+        targets,
+    )
+    return {"scheduled": len(targets), "method": method, "media": absolute, "to_all": to_all}
+
+
+@app.post("/notify/video", dependencies=[Depends(require_api_key)])
+def notify_video(
+    request: Request,
+    background: BackgroundTasks,
+    media_url: str = Form(...),                # /static/videos/xxx.mp4 yoki http(s) url
+    caption: Optional[str] = Form(None),
+    tg_id: Optional[int] = Form(None),
+    role: Optional[UserRole] = Form(None),
+    include_blocked: bool = Form(False),
+    parse_mode: Optional[str] = Form("HTML"),
+    disable_notification: bool = Form(False),
+    to_all: bool = Form(False),
+):
+    _ensure_bot_token()
+    absolute = _abs_url_from_req(request, media_url)
+    targets = _select_targets(
+        tg_id=tg_id, role=role, include_blocked=include_blocked, to_all=to_all
+    )
+    if not targets:
+        return {"scheduled": 0, "method": "sendVideo", "media": absolute, "to_all": to_all}
+    background.add_task(
+        _broadcast_sync,
+        "sendVideo",
+        "video",
+        absolute,
+        caption,
+        parse_mode,
+        None,
+        disable_notification,
+        targets,
+    )
+    return {"scheduled": len(targets), "method": "sendVideo", "media": absolute, "to_all": to_all}
