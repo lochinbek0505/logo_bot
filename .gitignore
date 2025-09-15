@@ -5,3 +5,14 @@ __pycache__
 *.pyc
 *.pyo
 *.pyd
+# DB (lokal)
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+data/*.db
+data/*.db.bak
+
+# (ixtiyoriy) yuklangan fayllar
+static/images/
+static/audios/
