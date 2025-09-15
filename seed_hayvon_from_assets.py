@@ -33,7 +33,7 @@ TITLE_MAP = {
     "ayiq": "Ayiq",
     "bori": "Bo'ri",
     "echki": "Echki",
-    "eshak": "Eshak",
+    "eshak": "Eshak"    ,
     "goz": "G'oz",
     "ilon": "Ilon",
     "kuchuk": "Kuchuk",

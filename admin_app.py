@@ -35,6 +35,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.openapi.utils import get_openapi
 from sqlmodel import SQLModel, Field, Session, create_engine, select
+from sqlmodel import col
+class HayGroup(str, Enum):
+    animal = "animal"
+    action = "action"
+    transport = "transport"
+    nature = "nature"
+    misc = "misc"
 
 # ===================== Config =====================
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "changeme")
@@ -69,6 +76,23 @@ for p in (IMG_DIR, AUD_DIR, PDF_DIR, VID_DIR, DB_PATH.parent):
     p.mkdir(parents=True, exist_ok=True)
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+# ==== NEW: HayvonQuestion (1 audio) + HayvonOption (3 rasmdan biri to‘g‘ri) ====
+class HayvonQuestion(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    key: str                 # unique-like
+    title: str
+    group: HayGroup = Field(default=HayGroup.animal)
+    audio_path: str
+    enabled: bool = True
+    sort_order: int = 0
+
+class HayvonOption(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    question_id: int = Field(foreign_key="hayvonquestion.id")
+    opt_key: str            # masalan: mushuk_01_A (callback uchun)
+    image_path: str
+    is_correct: bool = False
+    sort_order: int = 0
 
 
 def require_api_key(api_key: Optional[str] = Depends(api_key_header)):
@@ -567,6 +591,48 @@ def export_hayvon(enabled_only: bool = True, group: Optional[HayGroup] = None):
         }
         for i in items
     ]
+# ===================== Export for bot (Questions) =====================
+@app.get("/export/hayvonq")
+def export_hayvonq(enabled_only: bool = True, group: Optional[HayGroup] = None):
+    with Session(engine) as s:
+        q = select(HayvonQuestion).order_by(HayvonQuestion.group, HayvonQuestion.sort_order)
+        if enabled_only:
+            q = q.where(HayvonQuestion.enabled == True)
+        if group is not None:
+            q = q.where(HayvonQuestion.group == group)
+        questions = s.exec(q).all()
+
+        # oldini olish uchun bitta select bilan hammasini olib, keyin group qilamiz
+        all_opts = s.exec(select(HayvonOption)).all()
+        by_q: Dict[int, list[HayvonOption]] = {}
+        for o in all_opts:
+            by_q.setdefault(o.question_id, []).append(o)
+
+    out = []
+    for qu in questions:
+        opts = sorted(by_q.get(qu.id, []), key=lambda x: x.sort_order)
+        if not opts:
+            # variantlar bo‘lmasa, eksport qilmaymiz
+            continue
+
+        # yo‘llarni /static/... ga to‘g‘rilash
+        def fix_img(p: str) -> str:
+            return p if p.startswith("/static/") else f"/static/images/{Path(p).name}"
+        def fix_aud(p: str) -> str:
+            return p if p.startswith("/static/") else f"/static/audios/{Path(p).name}"
+
+        options = [{"opt_key": o.opt_key, "image_url": fix_img(o.image_path)} for o in opts]
+        correct_opt_key = next((o.opt_key for o in opts if o.is_correct), None)
+
+        out.append({
+            "key": qu.key,
+            "title": qu.title,
+            "group": qu.group,
+            "audio_url": fix_aud(qu.audio_path),
+            "options": options,
+            "correct_opt_key": correct_opt_key,
+        })
+    return out
 
 
 @app.get("/export/darslik/{code}")
@@ -1005,3 +1071,119 @@ def notify_mixed(
 
     background.add_task(_broadcast_sequence_sync, jobs, disable_notification, targets)
     return {"scheduled": len(targets), "jobs": len(jobs), "to_all": to_all}
+# ===================== HayvonQuestion CRUD =====================
+from sqlmodel import col
+
+@app.get("/hayvonq")
+def list_hayvonq(enabled: Optional[bool] = None, group: Optional[HayGroup] = None):
+    with Session(engine) as s:
+        q = select(HayvonQuestion).order_by(HayvonQuestion.group, HayvonQuestion.sort_order)
+        if enabled is not None:
+            q = q.where(HayvonQuestion.enabled == enabled)
+        if group is not None:
+            q = q.where(HayvonQuestion.group == group)
+        return s.exec(q).all()
+
+@app.post("/hayvonq", dependencies=[Depends(require_api_key)])
+def create_hayvonq(item: HayvonQuestion):
+    with Session(engine) as s:
+        exists = s.exec(select(HayvonQuestion).where(HayvonQuestion.key == item.key)).first()
+        if exists:
+            raise HTTPException(409, detail="key already exists")
+        s.add(item)
+        s.commit()
+        s.refresh(item)
+        return item
+
+@app.put("/hayvonq/{qid}", dependencies=[Depends(require_api_key)])
+def update_hayvonq(qid: int, data: HayvonQuestion):
+    with Session(engine) as s:
+        obj = s.get(HayvonQuestion, qid)
+        if not obj:
+            raise HTTPException(404)
+        if data.key != obj.key:
+            dupe = s.exec(select(HayvonQuestion).where(HayvonQuestion.key == data.key)).first()
+            if dupe:
+                raise HTTPException(409, detail="key already exists")
+        for f in ["key","title","group","audio_path","enabled","sort_order"]:
+            setattr(obj, f, getattr(data, f))
+        s.add(obj)
+        s.commit()
+        s.refresh(obj)
+        return obj
+
+@app.delete("/hayvonq/{qid}", dependencies=[Depends(require_api_key)])
+def delete_hayvonq(qid: int):
+    with Session(engine) as s:
+        obj = s.get(HayvonQuestion, qid)
+        if not obj:
+            raise HTTPException(404)
+        # kaskad: avval variantlarni o‘chiramiz
+        s.exec(select(HayvonOption).where(HayvonOption.question_id == qid)).all()
+        opts = s.exec(select(HayvonOption).where(HayvonOption.question_id == qid)).all()
+        for o in opts:
+            s.delete(o)
+        s.delete(obj)
+        s.commit()
+        return {"ok": True}
+
+# ===================== HayvonOption CRUD =====================
+@app.get("/hayvonq/{qid}/options")
+def list_hayvonq_options(qid: int):
+    with Session(engine) as s:
+        q = select(HayvonOption).where(HayvonOption.question_id == qid).order_by(HayvonOption.sort_order)
+        return s.exec(q).all()
+
+@app.post("/hayvonq/{qid}/options", dependencies=[Depends(require_api_key)])
+def create_hayvonq_option(qid: int, opt: HayvonOption):
+    with Session(engine) as s:
+        qobj = s.get(HayvonQuestion, qid)
+        if not qobj:
+            raise HTTPException(404, detail="question not found")
+        # bir savolda opt_key yagona bo‘lsin
+        dupe = s.exec(
+            select(HayvonOption).where(
+                HayvonOption.question_id == qid,
+                HayvonOption.opt_key == opt.opt_key
+            )
+        ).first()
+        if dupe:
+            raise HTTPException(409, detail="opt_key already exists")
+        opt.question_id = qid
+        s.add(opt)
+        s.commit()
+        s.refresh(opt)
+        return opt
+
+@app.put("/hayvonq/options/{opt_id}", dependencies=[Depends(require_api_key)])
+def update_hayvonq_option(opt_id: int, data: HayvonOption):
+    with Session(engine) as s:
+        obj = s.get(HayvonOption, opt_id)
+        if not obj:
+            raise HTTPException(404)
+        # opt_key uniqueness per question
+        if data.opt_key != obj.opt_key:
+            dupe = s.exec(
+                select(HayvonOption).where(
+                    HayvonOption.question_id == obj.question_id,
+                    HayvonOption.opt_key == data.opt_key
+                )
+            ).first()
+            if dupe:
+                raise HTTPException(409, detail="opt_key already exists")
+        for f in ["opt_key","image_path","is_correct","sort_order"]:
+            setattr(obj, f, getattr(data, f))
+        s.add(obj)
+        s.commit()
+        s.refresh(obj)
+        return obj
+
+@app.delete("/hayvonq/options/{opt_id}", dependencies=[Depends(require_api_key)])
+def delete_hayvonq_option(opt_id: int):
+    with Session(engine) as s:
+        obj = s.get(HayvonOption, opt_id)
+        if not obj:
+            raise HTTPException(404)
+        s.delete(obj)
+        s.commit()
+        return {"ok": True}
