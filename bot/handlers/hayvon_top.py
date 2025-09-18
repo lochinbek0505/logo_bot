@@ -77,28 +77,24 @@ def group_items(items: list[dict]) -> dict[str, list[dict]]:
         g.setdefault(it["group"], []).append(it)
     return g
 
-
 def pick_question(qs: list[dict]) -> tuple[dict, list[dict], str]:
     """
-    Bir tasodifiy savolni tanlaydi:
+    Birinchi savolni tanlaydi (randomsiz, tartibiy):
       returns: (question, choices[3], correct_opt_key)
     """
-    q = random.choice(qs)
-    opts = q["options"][:]
-    random.shuffle(opts)
+    q = qs[0]  # faqat birinchi savolni olamiz
+    opts = q["options"]
 
-    # 3 dan ko'p bo'lsa — to'g'ri javob ichida bo'lishi shart
     correct = q["correct_opt_key"]
+
     if len(opts) > 3:
-        # avval to'g'ri variantni olamiz
+        # to‘g‘ri javobni topamiz
         right = next(o for o in opts if o["opt_key"] == correct)
-        # qolganlardan 2 tasini tanlaymiz
+        # qolganlardan faqat dastlabki 2 tasini olamiz
         others = [o for o in opts if o["opt_key"] != correct]
-        random.shuffle(others)
         choices = [right] + others[:2]
-        random.shuffle(choices)
     else:
-        choices = opts  # odatda aynan 3 ta bo'ladi
+        choices = opts  # agar <=3 bo‘lsa, hammasini olamiz
 
     return q, choices, correct
 
