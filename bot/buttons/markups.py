@@ -3,8 +3,8 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 def markup():
     kb = ReplyKeyboardBuilder()
-    kb.button(text="📋 Diagnostika qilish")
-    kb.button(text="🎧 Eshituv idrokini rivojlantirish")
+    kb.button(text="📋 Tovushlar talaffuzini diagnostika qilish")
+    kb.button(text="🎧 Eshituv idrokini tekshirish va rivojlantirish")
     kb.button(text="📚 Darsliklar")
 
     # Tugmalarni 2+1 joylashtiramiz

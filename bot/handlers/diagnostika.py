@@ -291,7 +291,7 @@ async def _send_step_photo(message: types.Message, step_index: int, items: List[
 
 # ===================== Boshlash =====================
 # Eslatma: Reply-menyu tugmasi "📋 Diagnostika qilish" — ana shu matn bilan bog'lash kerak.  :contentReference[oaicite:5]{index=5}
-@diagnostika.message(F.text == "📋 Diagnostika qilish")
+@diagnostika.message(F.text == "📋 Tovushlar talaffuzini diagnostika qilish")
 async def diagnostika_start(message: types.Message, state: FSMContext):
     # Avval healthcheck
     ok, status, _ = await _admin_healthcheck(ADMIN_BASE)
