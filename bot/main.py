@@ -100,6 +100,7 @@ class ForceSubscribeMiddleware(BaseMiddleware):
         event: Any,
         data: Dict[str, Any]
     ) -> Any:
+        # Agar kanal sozlanmagan bo‘lsa yoki private chat bo‘lmasa — o‘tkazib yuboramiz
         if not self.channels:
             return await handler(event, data)
 
@@ -110,6 +111,7 @@ class ForceSubscribeMiddleware(BaseMiddleware):
         if not from_user or not chat or getattr(chat, "type", "") != "private":
             return await handler(event, data)
 
+        # "✅ Tekshirish" callbackiga ruxsat
         if isinstance(event, CallbackQuery) and event.data == CHECK_CB_DATA:
             log.info("Skip FS check for re-check callback: user=%s", from_user.id)
             return await handler(event, data)
@@ -121,16 +123,62 @@ class ForceSubscribeMiddleware(BaseMiddleware):
 
         kb = build_sub_keyboard(self.channels)
         try:
+            # foydalanuvchiga prompt yuboramiz
             if isinstance(event, Message):
-                await bot.send_message(chat_id=from_user.id, text=self.prompt_text, reply_markup=kb, parse_mode="HTML")
+                await bot.send_message(
+                    chat_id=from_user.id,
+                    text=self.prompt_text,
+                    reply_markup=kb,
+                    parse_mode="HTML"
+                )
             elif isinstance(event, CallbackQuery):
-                await bot.send_message(chat_id=from_user.id, text=self.prompt_text, reply_markup=kb, parse_mode="HTML")
+                await bot.send_message(
+                    chat_id=from_user.id,
+                    text=self.prompt_text,
+                    reply_markup=kb,
+                    parse_mode="HTML"
+                )
         except Exception as e:
             log.error("FS prompt send error: user=%s err=%s", from_user.id, e)
         return
 
 # ===================== Router: Re-Check Callback =====================
 fs_router = Router()
+
+async def send_welcome(bot: Bot, user_id: int, user_obj=None):
+    """
+    Obuna tasdiqlangach darhol asosiy menyuni yuboradi.
+    upsert_user() chaqiradi va salomlashadi.
+    """
+    try:
+        if user_obj is not None:
+            await upsert_user(user_obj)
+        else:
+            # Agar user_obj bo‘lmasa ham, getChat orqali kamida username olishga urinamiz
+            pass
+    except Exception as e:
+        log.warning("upsert_user fail user_id=%s err=%s", user_id, e)
+
+    # Username yoki full_name
+    username = None
+    try:
+        if user_obj and getattr(user_obj, "username", None):
+            username = user_obj.username
+        elif user_obj and getattr(user_obj, "full_name", None):
+            username = user_obj.full_name
+    except Exception:
+        pass
+    if not username:
+        username = "foydalanuvchi"
+
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=f"✅ Obuna tasdiqlandi.\nSalom, {username}! Asosiy menyudan foydalanishingiz mumkin.",
+            reply_markup=DEFAULT_MARKUP
+        )
+    except Exception as e:
+        log.error("send_welcome error user_id=%s err=%s", user_id, e)
 
 @fs_router.callback_query(F.data == CHECK_CB_DATA)
 async def recheck_subscription(cb: CallbackQuery):
@@ -142,12 +190,28 @@ async def recheck_subscription(cb: CallbackQuery):
 
     ok = await is_user_subscribed(cb.message.bot, user_id, REQUIRED_CHANNELS)
     log.info("Re-check pressed: user=%s ok=%s", user_id, ok)
+
     if ok:
-        await cb.message.edit_text("✅ Obuna tasdiqlandi. Endi botdan foydalanishingiz mumkin.")
+        # Inline klaviaturani olib tashlab, matnni yangilab qo‘yamiz (agar tahrir qilish imkoni bo‘lsa)
+        try:
+            await cb.message.edit_text("✅ Obuna tasdiqlandi. Asosiy menyu yuborildi.")
+        except Exception as e:
+            log.debug("edit_text skipped user=%s err=%s", user_id, e)
+        try:
+            await cb.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        await cb.answer()  # Loading spinner yopilsin
+
+        # 🔹 Eng muhim qism: darhol asosiy menyuni yuboramiz ( /start bosmasdan )
+        await send_welcome(cb.message.bot, user_id, user_obj=cb.from_user)
+        return
     else:
         await cb.answer("Hali obuna topilmadi. Iltimos, avval obuna bo‘ling.", show_alert=True)
         kb = build_sub_keyboard(REQUIRED_CHANNELS)
         try:
+            # Faqat klaviaturani yangilaymiz, matnni saqlab qolamiz
             await cb.message.edit_reply_markup(reply_markup=kb)
         except Exception as e:
             log.warning("Edit reply markup failed: user=%s err=%s", user_id, e)
@@ -161,9 +225,14 @@ dp = Dispatcher()
 @dp.message(CommandStart())
 async def start(message: Message):
     await upsert_user(message.from_user)  # 🔹 user’ni ro‘yxatga olish
-    username = message.from_user.username or message.from_user.full_name
+    username = message.from_user.username or message.from_user.full_name or "foydalanuvchi"
     await message.reply(f"Salom, {username}!", reply_markup=DEFAULT_MARKUP)
-    
+
+# ixtiyoriy: foydalanuvchi "Boshlash" deb yozsa ham start menyusini yuborish
+@dp.message(F.text.in_({"Boshlash", "boshlash", "Start", "start"}))
+async def start_alias(message: Message):
+    await start(message)
+
 # ===================== Main =====================
 async def main():
     # Bot ma'lumotini loglaymiz

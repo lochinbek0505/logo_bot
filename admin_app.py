@@ -32,7 +32,7 @@ from fastapi import (
 )
 from fastapi.security.api_key import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from    .staticfiles import StaticFiles
 from fastapi.openapi.utils import get_openapi
 from sqlmodel import SQLModel, Field, Session, create_engine, select
 from sqlmodel import col
